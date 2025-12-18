@@ -1,0 +1,59 @@
+[package]
+name = "biz-scraper"
+version = "0.1.0"
+edition = "2021"
+authors = ["BizCharts"]
+description = "4chan /biz/ board scraper for sentiment analysis"
+license = "MIT"
+
+[dependencies]
+# 4chan API client with built-in rate limiting
+# dot4ch = "0.3"  # Uncomment when ready to use
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "gzip"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TOML config parsing
+toml = "0.8"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Regex for ticker extraction
+regex = "1"
+
+# Rate limiting
+governor = "0.8"
+
+# Async traits
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[bin]]
+name = "biz-scraper"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

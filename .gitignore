@@ -1,0 +1,77 @@
+# Data files (large, generated)
+data/
+*.db
+*.duckdb
+*.sqlite
+
+# Images downloaded from 4chan
+images/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# Rust
+rust-scraper/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+.env.local
+*.toml.local
+
+# Models (large files)
+models/
+*.pt
+*.onnx
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Grafana
+grafana-data/
+
+# Reference repositories
+ClaudeTrader-reference/

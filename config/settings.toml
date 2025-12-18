@@ -1,0 +1,162 @@
+# BizCharts Configuration
+# Copy to settings.toml and fill in your values
+
+[scraper]
+# Polling interval in seconds (minimum 60 recommended)
+poll_interval_seconds = 60
+
+# 4chan API rate limit (DO NOT exceed 1)
+rate_limit_per_second = 1
+
+# Minimum seconds between thread updates
+thread_update_interval = 10
+
+# Board to scrape
+board = "biz"
+
+# Download thumbnails for image posts
+download_thumbnails = true
+
+# Full image download (more storage, better analysis)
+download_full_images = false
+
+[database]
+# SQLite database for raw posts
+sqlite_path = "data/posts.db"
+
+# DuckDB database for analytics
+duckdb_path = "data/analytics.duckdb"
+
+# Image storage directory
+images_dir = "data/images"
+
+[sentiment]
+# Minimum confidence to include in aggregations
+confidence_threshold = 0.5
+
+# Use Claude for posts below this confidence
+vader_confidence_threshold = 0.6
+
+# Send ambiguous posts to Claude for analysis
+use_claude_for_ambiguous = true
+
+# Sentiment score thresholds
+bullish_threshold = 0.05
+bearish_threshold = -0.05
+
+# Greentext confidence multiplier (reduces confidence for ironic content)
+greentext_confidence_factor = 0.6
+
+[sentiment.fusion]
+# Weight for text sentiment in fusion
+text_weight = 0.6
+
+# Weight for image sentiment in fusion
+image_weight = 0.4
+
+[claude]
+# Claude model to use
+model = "claude-3-5-haiku-20241022"
+
+# Use Batch API for bulk processing (50% cost reduction)
+use_batch_api = true
+
+# Enable prompt caching (90% reduction on cached reads)
+enable_prompt_caching = true
+
+# Maximum tokens for response
+max_tokens = 200
+
+# Batch size for Batch API
+batch_size = 1000
+
+# Timeout for batch completion (seconds)
+batch_timeout = 3600
+
+[image_analysis]
+# Use CLIP for zero-shot classification
+use_clip = true
+
+# CLIP model name
+clip_model = "openai/clip-vit-base-patch32"
+
+# Use YOLOv8 for Wojak/Pepe detection
+use_yolo = true
+
+# YOLOv8 model path (after training)
+yolo_model_path = "models/wojak_detector.pt"
+
+# Use PaddleOCR for meme text extraction
+use_ocr = true
+
+# OCR confidence threshold
+ocr_confidence_threshold = 0.5
+
+[aggregation]
+# Time bucket sizes to compute
+bucket_sizes = ["minute", "hour", "day", "week"]
+
+# How often to run aggregation (seconds)
+aggregation_interval = 300
+
+# Keep raw sentiment scores for this many days
+raw_retention_days = 30
+
+# Keep aggregated data for this many days
+aggregated_retention_days = 365
+
+[fear_greed]
+# Component weights for Fear/Greed index calculation
+sentiment_weight = 0.40
+ratio_weight = 0.30
+volume_weight = 0.20
+price_correlation_weight = 0.10
+
+# Use price correlation in calculation (requires CoinGecko data)
+include_price_correlation = true
+
+[coingecko]
+# CoinGecko API for price data
+api_url = "https://api.coingecko.com/api/v3"
+
+# Rate limit (requests per minute, free tier = 10-30)
+rate_limit_per_minute = 10
+
+# Coins to track for correlation
+tracked_coins = ["bitcoin", "ethereum", "solana"]
+
+# How often to fetch price data (seconds)
+price_fetch_interval = 300
+
+[grafana]
+# Grafana datasource name for DuckDB
+datasource_name = "BizCharts DuckDB"
+
+# Dashboard refresh interval
+refresh_interval = "1m"
+
+[logging]
+# Log level: DEBUG, INFO, WARNING, ERROR
+level = "INFO"
+
+# Log file path
+file = "logs/bizcharts.log"
+
+# Rotate logs when they reach this size (MB)
+max_size_mb = 100
+
+# Keep this many rotated log files
+backup_count = 5
+
+[alerts]
+# Enable sentiment shift alerts
+enabled = false
+
+# Alert if Fear/Greed index changes by this much in 1 hour
+shift_threshold = 15
+
+# Webhook URL for alerts (Discord, Slack, etc.)
+# webhook_url = "https://hooks.slack.com/..."
+
+# Alert cooldown (seconds) - don't spam alerts
+cooldown_seconds = 3600
