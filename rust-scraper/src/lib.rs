@@ -5,10 +5,12 @@
 pub mod config;
 pub mod db;
 pub mod extractor;
+pub mod maintenance;
 pub mod scraper;
 pub mod warosu;
 
 pub use config::Config;
 pub use db::Database;
+pub use maintenance::{Maintenance, RetentionConfig};
 pub use scraper::BizScraper;
 pub use warosu::WarosuScraper;

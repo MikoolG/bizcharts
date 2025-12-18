@@ -25,6 +25,12 @@ impl Database {
         Ok(Self { conn })
     }
 
+    /// Get a reference to the underlying connection
+    /// Used for maintenance operations
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Run database migrations
     pub fn run_migrations(&self) -> Result<()> {
         self.conn.execute_batch(
