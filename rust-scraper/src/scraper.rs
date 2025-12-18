@@ -1,21 +1,26 @@
-//! 4chan API scraper implementation
+//! 4chan Catalog-Only Scraper - OP-focused data collection
+//!
+//! This scraper efficiently collects thread OP data directly from the catalog,
+//! avoiding the need to fetch individual threads. The catalog provides full OP
+//! text, images, and popularity metrics in a single request.
 
 use anyhow::Result;
 use governor::{Quota, RateLimiter as GovRateLimiter};
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
-use crate::db::{Database, Post, Thread, CoinMention};
+use crate::db::{Database, ThreadOp};
 use crate::extractor::extract_coins;
 
 const API_BASE: &str = "https://a.4cdn.org";
 const IMAGE_BASE: &str = "https://i.4cdn.org";
 
-/// Main scraper struct
+/// Main scraper struct - catalog-only approach
 pub struct BizScraper {
     client: Client,
     rate_limiter: GovRateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
@@ -30,9 +35,10 @@ impl BizScraper {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .gzip(true)
+            .user_agent("BizCharts/1.0 (Sentiment Analysis Research)")
             .build()?;
 
-        // Rate limiter: 1 request per second
+        // Rate limiter: 1 request per second (conservative)
         let quota = Quota::per_second(NonZeroU32::new(config.scraper.rate_limit_per_second).unwrap());
         let rate_limiter = GovRateLimiter::direct(quota);
 
@@ -47,138 +53,216 @@ impl BizScraper {
 
     /// Run the scraper forever
     pub async fn run_forever(&self, db: &Database) -> Result<()> {
+        info!("Starting catalog-only scraper for /{}/", self.board);
+        info!("Poll interval: {}s", self.poll_interval.as_secs());
+
         loop {
-            match self.scrape_cycle(db).await {
-                Ok(count) => info!("Scrape cycle complete, processed {} posts", count),
-                Err(e) => error!("Scrape cycle error: {}", e),
+            match self.scrape_catalog(db).await {
+                Ok(stats) => {
+                    info!(
+                        "Catalog scraped: {} threads ({} new, {} updated), top coins: {:?}",
+                        stats.total, stats.new_threads, stats.updated_threads, stats.top_coins
+                    );
+                }
+                Err(e) => {
+                    warn!("Scrape cycle error: {}", e);
+                }
             }
 
             tokio::time::sleep(self.poll_interval).await;
         }
     }
 
-    /// Single scrape cycle
-    async fn scrape_cycle(&self, db: &Database) -> Result<usize> {
-        let mut total_posts = 0;
-
-        // Fetch catalog
-        let catalog = self.fetch_catalog().await?;
-
-        for page in catalog {
-            for thread_info in page.threads {
-                // Check if thread needs updating
-                let last_updated = db.get_thread_last_updated(thread_info.no)?;
-                let needs_update = last_updated
-                    .map(|lu| thread_info.last_modified > lu)
-                    .unwrap_or(true);
-
-                if !needs_update {
-                    debug!("Thread {} unchanged, skipping", thread_info.no);
-                    continue;
-                }
-
-                // Rate limit before fetching
-                self.rate_limiter.until_ready().await;
-
-                // Fetch full thread
-                match self.fetch_thread(thread_info.no).await {
-                    Ok(thread) => {
-                        let post_count = self.process_thread(db, &thread).await?;
-                        total_posts += post_count;
-                    }
-                    Err(e) => {
-                        warn!("Failed to fetch thread {}: {}", thread_info.no, e);
-                    }
-                }
-            }
-        }
-
-        Ok(total_posts)
-    }
-
-    /// Fetch board catalog
-    async fn fetch_catalog(&self) -> Result<Vec<CatalogPage>> {
-        let url = format!("{}/{}/catalog.json", API_BASE, self.board);
-
+    /// Scrape the catalog and extract all OP data
+    pub async fn scrape_catalog(&self, db: &Database) -> Result<ScrapeStats> {
+        // Rate limit before fetching
         self.rate_limiter.until_ready().await;
+
+        let url = format!("{}/{}/catalog.json", API_BASE, self.board);
+        debug!("Fetching catalog: {}", url);
 
         let response = self.client.get(&url).send().await?;
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-            return Ok(vec![]);
+            debug!("Catalog unchanged (304)");
+            return Ok(ScrapeStats::default());
+        }
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Catalog fetch failed: {}", response.status()));
         }
 
         let catalog: Vec<CatalogPage> = response.json().await?;
-        Ok(catalog)
-    }
 
-    /// Fetch a single thread
-    async fn fetch_thread(&self, thread_id: i64) -> Result<ThreadResponse> {
-        let url = format!("{}/{}/thread/{}.json", API_BASE, self.board, thread_id);
+        let mut stats = ScrapeStats::default();
+        let mut coin_counts: HashMap<String, i32> = HashMap::new();
 
-        let response = self.client.get(&url).send().await?;
-        let thread: ThreadResponse = response.json().await?;
+        for page in &catalog {
+            for thread in &page.threads {
+                let thread_op = self.catalog_thread_to_op(thread, page.page);
 
-        Ok(thread)
-    }
+                // Extract coins from OP text, subject, and filename
+                let mut mentions = Vec::new();
 
-    /// Process a thread and store posts
-    async fn process_thread(&self, db: &Database, thread: &ThreadResponse) -> Result<usize> {
-        let mut count = 0;
-
-        for api_post in &thread.posts {
-            // Convert to our Post struct
-            let post = Post {
-                post_id: api_post.no,
-                thread_id: thread.posts.first().map(|p| p.no).unwrap_or(0),
-                timestamp: api_post.time,
-                name: api_post.name.clone(),
-                text: api_post.com.clone(),
-                has_image: api_post.tim.is_some(),
-                image_url: api_post.tim.map(|tim| {
-                    format!("{}/{}/{}{}", IMAGE_BASE, self.board, tim, api_post.ext.as_deref().unwrap_or(".jpg"))
-                }),
-                image_md5: api_post.md5.clone(),
-                thumbnail_url: api_post.tim.map(|tim| {
-                    format!("{}/{}/{}s.jpg", IMAGE_BASE, self.board, tim)
-                }),
-                replies_to: None, // TODO: Extract from comment
-            };
-
-            // Store post
-            db.upsert_post(&post)?;
-
-            // Extract and store coin mentions
-            if let Some(ref text) = post.text {
-                let mentions = extract_coins(text);
-                if !mentions.is_empty() {
-                    db.insert_mentions(post.post_id, &mentions)?;
+                if let Some(ref text) = thread_op.op_text {
+                    for mention in extract_coins(text) {
+                        *coin_counts.entry(mention.symbol.clone()).or_insert(0) += 1;
+                        mentions.push(mention.with_source("text"));
+                    }
                 }
+
+                if let Some(ref subject) = thread_op.subject {
+                    for mention in extract_coins(subject) {
+                        if !mentions.iter().any(|m| m.symbol == mention.symbol) {
+                            *coin_counts.entry(mention.symbol.clone()).or_insert(0) += 1;
+                            mentions.push(mention.with_source("subject"));
+                        }
+                    }
+                }
+
+                if let Some(ref filename) = thread_op.image_filename {
+                    for mention in extract_coins(filename) {
+                        if !mentions.iter().any(|m| m.symbol == mention.symbol) {
+                            *coin_counts.entry(mention.symbol.clone()).or_insert(0) += 1;
+                            mentions.push(mention.with_source("filename"));
+                        }
+                    }
+                }
+
+                // Store thread OP
+                let is_new = db.upsert_thread_op(&thread_op)?;
+
+                if is_new {
+                    stats.new_threads += 1;
+                } else {
+                    stats.updated_threads += 1;
+                }
+
+                // Store coin mentions (only for new threads or if mentions exist)
+                if !mentions.is_empty() {
+                    db.insert_op_mentions(thread_op.thread_id, &mentions)?;
+                }
+
+                stats.total += 1;
             }
-
-            count += 1;
         }
 
-        // Update thread metadata
-        if let Some(op) = thread.posts.first() {
-            let thread_data = Thread {
-                thread_id: op.no,
-                subject: op.sub.clone(),
-                op_post_id: op.no,
-                board: self.board.clone(),
-                created_at: op.time,
-                last_updated: thread.posts.last().map(|p| p.time).unwrap_or(op.time),
-                reply_count: thread.posts.len() as i32 - 1,
-                image_count: thread.posts.iter().filter(|p| p.tim.is_some()).count() as i32,
-            };
-            db.upsert_thread(&thread_data)?;
-        }
+        // Get top coins for snapshot
+        let mut top_coins: Vec<_> = coin_counts.into_iter().collect();
+        top_coins.sort_by(|a, b| b.1.cmp(&a.1));
+        stats.top_coins = top_coins.into_iter().take(5).map(|(s, _)| s).collect();
 
-        Ok(count)
+        // Calculate and save catalog snapshot
+        let threads_with_images = catalog.iter()
+            .flat_map(|p| &p.threads)
+            .filter(|t| t.tim.is_some())
+            .count() as i32;
+
+        let avg_replies = if stats.total > 0 {
+            catalog.iter()
+                .flat_map(|p| &p.threads)
+                .map(|t| t.replies.unwrap_or(0) as f64)
+                .sum::<f64>() / stats.total as f64
+        } else {
+            0.0
+        };
+
+        let top_coins_json = serde_json::to_string(&stats.top_coins).unwrap_or_default();
+        db.save_catalog_snapshot(stats.total, threads_with_images, avg_replies, &top_coins_json)?;
+
+        Ok(stats)
+    }
+
+    /// Convert catalog thread data to ThreadOp struct
+    fn catalog_thread_to_op(&self, thread: &CatalogThread, page: i32) -> ThreadOp {
+        let image_url = thread.tim.map(|tim| {
+            format!(
+                "{}/{}/{}{}",
+                IMAGE_BASE,
+                self.board,
+                tim,
+                thread.ext.as_deref().unwrap_or(".jpg")
+            )
+        });
+
+        let thumbnail_url = thread.tim.map(|tim| {
+            format!("{}/{}/{}s.jpg", IMAGE_BASE, self.board, tim)
+        });
+
+        ThreadOp {
+            thread_id: thread.no,
+            subject: thread.sub.clone(),
+            board: self.board.clone(),
+            op_text: thread.com.clone(),
+            op_text_clean: thread.com.as_ref().map(|t| strip_html(t)),
+            op_name: thread.name.clone(),
+            op_tripcode: thread.trip.clone(),
+            has_image: thread.tim.is_some(),
+            image_url,
+            thumbnail_url,
+            image_md5: thread.md5.clone(),
+            image_filename: thread.filename.clone(),
+            image_width: thread.w,
+            image_height: thread.h,
+            image_size: thread.fsize,
+            created_at: thread.time,
+            last_modified: Some(thread.last_modified),
+            reply_count: thread.replies.unwrap_or(0),
+            image_count: thread.images.unwrap_or(0),
+            unique_ips: thread.unique_ips,
+            page_position: Some(page),
+            bump_limit_reached: thread.bumplimit.unwrap_or(0) == 1,
+            image_limit_reached: thread.imagelimit.unwrap_or(0) == 1,
+            is_sticky: thread.sticky.unwrap_or(0) == 1,
+            is_closed: thread.closed.unwrap_or(0) == 1,
+            source: "live".to_string(),
+        }
     }
 }
 
-// API response types
+/// Statistics from a scrape cycle
+#[derive(Debug, Default)]
+pub struct ScrapeStats {
+    pub total: i32,
+    pub new_threads: i32,
+    pub updated_threads: i32,
+    pub top_coins: Vec<String>,
+}
+
+/// Strip HTML tags from text (basic implementation)
+fn strip_html(text: &str) -> String {
+    // First, handle <br> tags as newlines
+    let text = text
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n");
+
+    // Remove HTML tags (before decoding entities to avoid &gt; being treated as >)
+    let mut result = String::with_capacity(text.len());
+    let mut in_tag = false;
+
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+
+    // Then decode HTML entities
+    let result = result
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'");
+
+    // Normalize whitespace
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// === API Response Types ===
 
 #[derive(Debug, Deserialize)]
 struct CatalogPage {
@@ -188,26 +272,74 @@ struct CatalogPage {
 
 #[derive(Debug, Deserialize)]
 struct CatalogThread {
-    no: i64,
-    #[serde(default)]
-    last_modified: i64,
-    replies: Option<i32>,
-    images: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ThreadResponse {
-    posts: Vec<ApiPost>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiPost {
+    // Required fields
     no: i64,
     time: i64,
-    name: Option<String>,
-    com: Option<String>,
-    sub: Option<String>,
-    tim: Option<i64>,
-    ext: Option<String>,
-    md5: Option<String>,
+
+    // Thread metadata
+    #[serde(default)]
+    last_modified: i64,
+    #[serde(default)]
+    replies: Option<i32>,
+    #[serde(default)]
+    images: Option<i32>,
+
+    // OP content
+    #[serde(default)]
+    sub: Option<String>,        // Subject
+    #[serde(default)]
+    com: Option<String>,        // Comment (full OP text)
+    #[serde(default)]
+    name: Option<String>,       // Poster name
+    #[serde(default)]
+    trip: Option<String>,       // Tripcode
+
+    // Image data
+    #[serde(default)]
+    tim: Option<i64>,           // Image timestamp (for URL)
+    #[serde(default)]
+    ext: Option<String>,        // Image extension
+    #[serde(default)]
+    filename: Option<String>,   // Original filename
+    #[serde(default)]
+    md5: Option<String>,        // Image MD5
+    #[serde(default)]
+    w: Option<i32>,             // Image width
+    #[serde(default)]
+    h: Option<i32>,             // Image height
+    #[serde(default)]
+    fsize: Option<i32>,         // File size
+
+    // Thread status
+    #[serde(default)]
+    sticky: Option<i32>,
+    #[serde(default)]
+    closed: Option<i32>,
+    #[serde(default)]
+    bumplimit: Option<i32>,
+    #[serde(default)]
+    imagelimit: Option<i32>,
+    #[serde(default)]
+    unique_ips: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_html() {
+        assert_eq!(
+            strip_html("<span class=\"quote\">&gt;greentext</span>"),
+            ">greentext"
+        );
+        assert_eq!(
+            strip_html("line1<br>line2<br/>line3"),
+            "line1 line2 line3"
+        );
+        assert_eq!(
+            strip_html("normal text"),
+            "normal text"
+        );
+    }
 }

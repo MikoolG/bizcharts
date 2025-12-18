@@ -115,18 +115,58 @@ price_correlation_weight = 0.10
 # Use price correlation in calculation (requires CoinGecko data)
 include_price_correlation = true
 
-[coingecko]
-# CoinGecko API for price data
-api_url = "https://api.coingecko.com/api/v3"
-
-# Rate limit (requests per minute, free tier = 10-30)
-rate_limit_per_minute = 10
-
-# Coins to track for correlation
+[price_data]
+# Coins to track for correlation (used by all sources)
 tracked_coins = ["bitcoin", "ethereum", "solana"]
 
 # How often to fetch price data (seconds)
+# With 3-source rotation: each source gets 1/3 of calls
+# 300s interval = 12 fetches/hour, 4 per source = 2,880/month each ✓
 price_fetch_interval = 300
+
+# Enable multi-source rotation for rate limit management
+enable_rotation = true
+
+# Source rotation order (cycles through on each fetch)
+rotation_order = ["coingecko", "binance", "coinmarketcap"]
+
+# Fallback: if current source fails, try next in rotation
+fallback_on_error = true
+
+# Price deviation threshold (%) to flag potential data issues
+# If sources differ by more than this, log a warning
+price_deviation_threshold = 2.0
+
+[price_data.sources.coingecko]
+# CoinGecko - Primary source (aggregated from 900+ exchanges)
+# Free Demo tier: 30 calls/min, 10,000 calls/month
+enabled = true
+api_url = "https://api.coingecko.com/api/v3"
+rate_limit_per_minute = 30
+monthly_limit = 10000
+# Maps our coin names to CoinGecko IDs
+coin_ids = { bitcoin = "bitcoin", ethereum = "ethereum", solana = "solana" }
+
+[price_data.sources.binance]
+# Binance - Real-time exchange prices (no rate limits on public data)
+# Direct from world's largest exchange by volume
+enabled = true
+api_url = "https://data-api.binance.vision/api/v3"
+rate_limit_per_minute = 1200
+monthly_limit = 0  # 0 = unlimited
+# Maps our coin names to Binance trading pairs (vs USDT)
+symbols = { bitcoin = "BTCUSDT", ethereum = "ETHUSDT", solana = "SOLUSDT" }
+
+[price_data.sources.coinmarketcap]
+# CoinMarketCap - Aggregated data (requires free API key)
+# Free tier: 10,000 calls/month
+enabled = true
+api_url = "https://pro-api.coinmarketcap.com/v1"
+api_key_env = "COINMARKETCAP_API_KEY"  # Set this env var for CMC
+rate_limit_per_minute = 30
+monthly_limit = 10000
+# Maps our coin names to CMC slugs
+slugs = { bitcoin = "bitcoin", ethereum = "ethereum", solana = "solana" }
 
 [grafana]
 # Grafana datasource name for DuckDB

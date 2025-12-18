@@ -72,11 +72,7 @@ pub fn extract_coins(text: &str) -> Vec<CoinMention> {
         let symbol = &cap[1];
         if KNOWN_TICKERS.contains(symbol) && !seen.contains(symbol) {
             seen.insert(symbol.to_string());
-            mentions.push(CoinMention {
-                symbol: symbol.to_string(),
-                name: None,
-                confidence: 0.95,
-            });
+            mentions.push(CoinMention::new(symbol.to_string(), None, 0.95));
         }
     }
 
@@ -85,11 +81,7 @@ pub fn extract_coins(text: &str) -> Vec<CoinMention> {
         let symbol = &cap[1];
         if KNOWN_TICKERS.contains(symbol) && !seen.contains(symbol) {
             seen.insert(symbol.to_string());
-            mentions.push(CoinMention {
-                symbol: symbol.to_string(),
-                name: None,
-                confidence: 0.75,
-            });
+            mentions.push(CoinMention::new(symbol.to_string(), None, 0.75));
         }
     }
 
@@ -98,11 +90,7 @@ pub fn extract_coins(text: &str) -> Vec<CoinMention> {
     for (name, symbol) in NAME_MAPPINGS.iter() {
         if text_lower.contains(name) && !seen.contains(*symbol) {
             seen.insert(symbol.to_string());
-            mentions.push(CoinMention {
-                symbol: symbol.to_string(),
-                name: Some(name.to_string()),
-                confidence: 0.85,
-            });
+            mentions.push(CoinMention::new(symbol.to_string(), Some(name.to_string()), 0.85));
         }
     }
 
