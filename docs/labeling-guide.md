@@ -43,6 +43,22 @@ python -m src.labeler --limit 500
 python -m src.labeler --review
 ```
 
+### Filtering by Source and Date
+
+```bash
+# Label only live catalog data
+python -m src.labeler --source live
+
+# Label only Warosu historical data
+python -m src.labeler --source warosu
+
+# Label data from a specific date range
+python -m src.labeler --from 2024-01-01 --to 2024-06-30
+
+# Combine filters: Warosu data from Q1 2024
+python -m src.labeler --source warosu --from 2024-01-01 --to 2024-03-31
+```
+
 ### Export & Statistics
 
 ```bash
@@ -51,15 +67,17 @@ python -m src.labeler --stats
 
 # Export labels to CSV
 python -m src.labeler --export labels.csv
+
+# Export labels for specific source
+python -m src.labeler --export warosu_labels.csv --source warosu
 ```
 
 ### Controls
 
 | Key | Action |
 |-----|--------|
-| `1-9` | Rate sentiment (1=extremely bearish, 5=neutral, 9=very bullish) |
-| `0` | Rate 10 (extremely bullish) |
-| `S` | Skip (post is irrelevant to sentiment) |
+| `1-5` | Rate sentiment (1=very bearish, 3=neutral, 5=very bullish) |
+| `0` or `S` | Skip (post is irrelevant to sentiment) |
 | `Left Arrow` | Go to previous post |
 | `Right Arrow` | Go to next post |
 | `N` | Add a note to current post |
@@ -67,20 +85,15 @@ python -m src.labeler --export labels.csv
 
 ## Rating Scale
 
-Use a 1-10 scale for sentiment:
+Use a 1-5 scale for sentiment:
 
 | Rating | Meaning | Examples |
 |--------|---------|----------|
-| 1 | Extremely bearish | "It's over", complete despair, pink wojak |
-| 2 | Very bearish | Strong negativity, predictions of crash |
-| 3 | Bearish | Negative outlook, concern about holdings |
-| 4 | Slightly bearish | Mild pessimism, uncertainty |
-| 5 | Neutral | Questions, news without opinion, analysis |
-| 6 | Slightly bullish | Mild optimism, cautious hope |
-| 7 | Bullish | Positive outlook, confident in holdings |
-| 8 | Very bullish | Strong optimism, predicting gains |
-| 9 | Extremely bullish | "WAGMI", "to the moon", green wojak |
-| 10 | Maximum bullish | Euphoria, celebration of massive gains |
+| 1 | Very Bearish | "It's over", complete despair, pink wojak, predictions of crash |
+| 2 | Bearish | Negative outlook, concern, mild pessimism |
+| 3 | Neutral/Crab | Questions, news without opinion, analysis, mixed signals |
+| 4 | Bullish | Positive outlook, optimism, confident in holdings |
+| 5 | Very Bullish | "WAGMI", "to the moon", green wojak, euphoria |
 
 ### Skip Criteria
 
@@ -98,7 +111,7 @@ Labels are stored in the SQLite database (`data/posts.db`) in the `training_labe
 CREATE TABLE training_labels (
     id INTEGER PRIMARY KEY,
     thread_id INTEGER,              -- Links to thread_ops
-    sentiment_rating INTEGER,       -- 1-10 scale
+    sentiment_rating INTEGER,       -- 1-5 scale (1=bearish, 3=neutral, 5=bullish)
     skipped BOOLEAN,                -- True if marked irrelevant
     notes TEXT,                     -- Optional labeler notes
     labeler_id TEXT,                -- Session/labeler identifier
@@ -107,6 +120,8 @@ CREATE TABLE training_labels (
     image_url_snapshot TEXT         -- Image URL at labeling time
 );
 ```
+
+Labels are source-agnostic - they link to `thread_ops` by `thread_id` regardless of whether the data came from live scraping or Warosu. You can filter by source/date when querying for analysis.
 
 ## Recommended Workflow
 
@@ -144,7 +159,7 @@ CREATE TABLE training_labels (
 - **Rate based on overall sentiment**, not just specific words
 - **Consider both text and image** when rating
 - **Irony/sarcasm**: If clearly ironic, rate the intended sentiment (e.g., ironic "WAGMI" during crash = bearish)
-- **Mixed signals**: If genuinely mixed, rate toward neutral (5-6)
+- **Mixed signals**: If genuinely mixed, rate toward neutral (3)
 - **Greentext stories**: Often ironic - read the full context
 
 ## Using Labeled Data
@@ -164,19 +179,23 @@ df = pd.read_sql("""
     SELECT
         t.thread_id,
         t.sentiment_score as auto_score,
-        l.sentiment_rating as human_rating
+        l.sentiment_rating as human_rating,
+        t.source
     FROM thread_ops t
     JOIN training_labels l ON t.thread_id = l.thread_id
     WHERE t.sentiment_score IS NOT NULL
       AND l.skipped = FALSE
 """, conn)
 
-# Convert human rating to -1 to +1 scale
-df['human_score'] = (df['human_rating'] - 5.5) / 4.5
+# Convert human rating (1-5) to -1 to +1 scale
+df['human_score'] = (df['human_rating'] - 3) / 2
 
 # Calculate correlation
 correlation = df['auto_score'].corr(df['human_score'])
 print(f"Correlation: {correlation:.3f}")
+
+# Can also filter by source for source-specific analysis
+warosu_df = df[df['source'] == 'warosu']
 ```
 
 ### Training
@@ -204,7 +223,7 @@ df.to_csv("training_data.csv", index=False)
 Find where automated systems fail:
 
 ```python
-# High-confidence errors
+# High-confidence errors (note: human rating 1-5 converted to -1 to +1 scale)
 errors = pd.read_sql("""
     SELECT
         t.thread_id,
@@ -212,7 +231,7 @@ errors = pd.read_sql("""
         t.sentiment_score as auto_score,
         t.sentiment_confidence as auto_confidence,
         l.sentiment_rating as human_rating,
-        ABS(t.sentiment_score - (l.sentiment_rating - 5.5) / 4.5) as error
+        ABS(t.sentiment_score - (l.sentiment_rating - 3) / 2.0) as error
     FROM thread_ops t
     JOIN training_labels l ON t.thread_id = l.thread_id
     WHERE t.sentiment_confidence > 0.7

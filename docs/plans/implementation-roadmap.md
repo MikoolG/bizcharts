@@ -203,12 +203,14 @@ impl RateLimiter {
 ```
 
 ### Acceptance Criteria
-- [ ] Scraper polls catalog every 60 seconds
-- [ ] If-Modified-Since headers reduce bandwidth
-- [ ] All posts stored in SQLite with correct schema
-- [ ] Coin mentions extracted with 90%+ accuracy on common tickers
-- [ ] Thumbnails downloaded and stored
-- [ ] No rate limit violations (monitor for 24 hours)
+- [x] Scraper polls catalog every 60 seconds
+- [x] If-Modified-Since headers reduce bandwidth
+- [x] All thread OPs stored in SQLite with correct schema
+- [x] Coin mentions extracted with 90%+ accuracy on common tickers
+- [x] Thumbnails downloaded and stored
+- [x] No rate limit violations (monitor for 24 hours)
+- [x] Warosu historical importer working with incremental support
+- [x] --coverage, --continue, --backfill flags for import management
 
 ---
 
@@ -432,6 +434,17 @@ def calculate_fear_greed_index(
 - [ ] DuckDB populated with sentiment scores
 - [ ] Hourly/daily aggregation views working
 - [ ] Fear/Greed index calculated correctly (validate against gut check)
+
+**Manual labeling support (completed Dec 2024):**
+- [x] Labeling GUI with thumbnail display
+- [x] 1-5 sentiment scale (1=bearish, 3=neutral, 5=bullish)
+- [x] Source filtering (live/warosu)
+- [x] Date range filtering
+- [x] Progress indicator and keyboard navigation
+- [x] Image caching and preloading for performance
+- [x] Database path auto-resolution
+- [x] Export to CSV functionality
+- [x] Initial labeled dataset: 200 posts (118 rated, 82 skipped)
 
 ---
 
@@ -830,13 +843,32 @@ async def get_coin_sentiment(symbol: str):
 
 ## Timeline Summary
 
-| Phase | Duration | Milestone |
-|-------|----------|-----------|
-| 1 | Foundational | Scraper running, data flowing |
-| 2 | Core | Text sentiment baseline working |
-| 3 | Enhanced | Image pipeline integrated |
-| 4 | Complete | Full dashboard operational |
+| Phase | Status | Milestone |
+|-------|--------|-----------|
+| 1 | **COMPLETE** | Scraper running, data flowing, Warosu importer ready |
+| 2 | **IN PROGRESS** | Manual labeling complete (200 posts), text sentiment pending |
+| 3 | Pending | Image pipeline integrated |
+| 4 | Pending | Full dashboard operational |
 | 5 | Ongoing | Continuous improvements |
+
+### Recent Updates (Dec 2024)
+
+**Phase 1 - Completed:**
+- Live scraper tested: pulls ~150 threads from 4chan catalog with thumbnails
+- Warosu importer fixed:
+  - Timestamp parsing now uses `title` attribute (Unix ms) instead of buggy display text
+  - Only captures thread OPs (checks for `[Reply]` link), not replies
+  - Thumbnail URL regex fixed for unquoted HTML attributes
+- Data sources properly separated: `source='live'` vs `source='warosu'`
+
+**Phase 2 - In Progress:**
+- Labeling GUI fully functional with performance optimizations:
+  - Image caching and preloading for smooth navigation
+  - Stats caching to avoid DB queries per navigation
+  - Images scale up (not just down) for better visibility
+- 200 posts labeled: 180 live (105 rated, 75 skipped), 20 warosu (13 rated, 7 skipped)
+- Average sentiment: 2.51 (live), 2.23 (warosu) - both leaning bearish
+- Text sentiment (VADER + lexicon) still pending
 
 ## Success Metrics
 

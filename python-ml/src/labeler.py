@@ -5,13 +5,20 @@ BizCharts Sentiment Labeling Tool
 A GUI tool for manually labeling thread OP sentiment to create training data.
 
 Usage:
-    python -m src.labeler                    # Label from database
-    python -m src.labeler --session my_session  # Named labeling session
-    python -m src.labeler --export labels.csv   # Export labeled data
+    python -m src.labeler                           # Label all unlabeled posts
+    python -m src.labeler --source warosu           # Label only warosu posts
+    python -m src.labeler --source live             # Label only live posts
+    python -m src.labeler --from 2024-01-01 --to 2024-06-30  # Date range
+    python -m src.labeler --session my_session      # Named labeling session
+    python -m src.labeler --export labels.csv       # Export labeled data
 
 Controls:
-    1-9, 0  : Rate sentiment (1=extremely bearish, 5=neutral, 0/10=extremely bullish)
-    S       : Skip this post (not relevant to sentiment)
+    1       : Very bearish (strong sell signals, panic, despair)
+    2       : Somewhat bearish (negative outlook, concerns)
+    3       : Neutral/Crab (sideways, uncertain, mixed signals)
+    4       : Somewhat bullish (positive outlook, optimism)
+    5       : Very bullish (strong buy signals, euphoria, WAGMI)
+    0/S     : Not relevant to sentiment (skip)
     Left    : Go to previous post
     Right   : Go to next post
     N       : Add a note to current post
@@ -49,6 +56,7 @@ class ThreadOP:
     op_text_clean: Optional[str]
     image_url: Optional[str]
     thumbnail_url: Optional[str]
+    local_thumbnail_path: Optional[str]  # Local path to downloaded thumbnail
     reply_count: int
     created_at: int
     source: str
@@ -75,7 +83,7 @@ class LabelingSession:
             CREATE TABLE IF NOT EXISTS training_labels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 thread_id INTEGER,
-                sentiment_rating INTEGER CHECK(sentiment_rating >= 1 AND sentiment_rating <= 10),
+                sentiment_rating INTEGER CHECK(sentiment_rating >= 1 AND sentiment_rating <= 5),
                 skipped BOOLEAN DEFAULT FALSE,
                 notes TEXT,
                 labeler_id TEXT DEFAULT 'default',
@@ -88,19 +96,49 @@ class LabelingSession:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_labels_thread ON training_labels(thread_id)")
         self.conn.commit()
 
-    def get_unlabeled_posts(self, limit: int = 1000) -> list[ThreadOP]:
+    def get_unlabeled_posts(self, limit: int = 1000, source: Optional[str] = None,
+                           date_from: Optional[str] = None, date_to: Optional[str] = None) -> list[ThreadOP]:
         """Get posts that haven't been labeled yet by this labeler."""
-        cursor = self.conn.execute("""
+        # Build query with optional filters
+        query = """
             SELECT
                 t.thread_id, t.subject, t.op_text, t.op_text_clean,
-                t.image_url, t.thumbnail_url, t.reply_count, t.created_at, t.source,
+                t.image_url, t.thumbnail_url, t.local_thumbnail_path,
+                t.reply_count, t.created_at, t.source,
                 l.sentiment_rating, l.skipped
             FROM thread_ops t
             LEFT JOIN training_labels l ON t.thread_id = l.thread_id AND l.labeler_id = ?
             WHERE l.id IS NULL
-            ORDER BY t.reply_count DESC, t.created_at DESC
-            LIMIT ?
-        """, (self.labeler_id, limit))
+        """
+        params = [self.labeler_id]
+
+        if source:
+            query += " AND t.source = ?"
+            params.append(source)
+
+        if date_from:
+            # Convert YYYY-MM-DD to Unix timestamp
+            try:
+                dt = datetime.strptime(date_from, "%Y-%m-%d")
+                query += " AND t.created_at >= ?"
+                params.append(int(dt.timestamp()))
+            except ValueError:
+                print(f"Warning: Invalid date format for --from: {date_from}")
+
+        if date_to:
+            try:
+                dt = datetime.strptime(date_to, "%Y-%m-%d")
+                # End of day
+                dt = dt.replace(hour=23, minute=59, second=59)
+                query += " AND t.created_at <= ?"
+                params.append(int(dt.timestamp()))
+            except ValueError:
+                print(f"Warning: Invalid date format for --to: {date_to}")
+
+        query += " ORDER BY t.reply_count DESC, t.created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = self.conn.execute(query, params)
 
         posts = []
         for row in cursor:
@@ -111,6 +149,7 @@ class LabelingSession:
                 op_text_clean=row["op_text_clean"],
                 image_url=row["image_url"],
                 thumbnail_url=row["thumbnail_url"],
+                local_thumbnail_path=row["local_thumbnail_path"],
                 reply_count=row["reply_count"] or 0,
                 created_at=row["created_at"],
                 source=row["source"],
@@ -119,18 +158,46 @@ class LabelingSession:
             ))
         return posts
 
-    def get_all_posts(self, limit: int = 1000) -> list[ThreadOP]:
+    def get_all_posts(self, limit: int = 1000, source: Optional[str] = None,
+                     date_from: Optional[str] = None, date_to: Optional[str] = None) -> list[ThreadOP]:
         """Get all posts (for review mode)."""
-        cursor = self.conn.execute("""
+        query = """
             SELECT
                 t.thread_id, t.subject, t.op_text, t.op_text_clean,
-                t.image_url, t.thumbnail_url, t.reply_count, t.created_at, t.source,
+                t.image_url, t.thumbnail_url, t.local_thumbnail_path,
+                t.reply_count, t.created_at, t.source,
                 l.sentiment_rating, l.skipped
             FROM thread_ops t
             LEFT JOIN training_labels l ON t.thread_id = l.thread_id AND l.labeler_id = ?
-            ORDER BY t.reply_count DESC, t.created_at DESC
-            LIMIT ?
-        """, (self.labeler_id, limit))
+            WHERE 1=1
+        """
+        params = [self.labeler_id]
+
+        if source:
+            query += " AND t.source = ?"
+            params.append(source)
+
+        if date_from:
+            try:
+                dt = datetime.strptime(date_from, "%Y-%m-%d")
+                query += " AND t.created_at >= ?"
+                params.append(int(dt.timestamp()))
+            except ValueError:
+                pass
+
+        if date_to:
+            try:
+                dt = datetime.strptime(date_to, "%Y-%m-%d")
+                dt = dt.replace(hour=23, minute=59, second=59)
+                query += " AND t.created_at <= ?"
+                params.append(int(dt.timestamp()))
+            except ValueError:
+                pass
+
+        query += " ORDER BY t.reply_count DESC, t.created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = self.conn.execute(query, params)
 
         posts = []
         for row in cursor:
@@ -141,6 +208,7 @@ class LabelingSession:
                 op_text_clean=row["op_text_clean"],
                 image_url=row["image_url"],
                 thumbnail_url=row["thumbnail_url"],
+                local_thumbnail_path=row["local_thumbnail_path"],
                 reply_count=row["reply_count"] or 0,
                 created_at=row["created_at"],
                 source=row["source"],
@@ -166,17 +234,29 @@ class LabelingSession:
               datetime.now().isoformat(), text_snapshot, image_url))
         self.conn.commit()
 
-    def get_stats(self) -> dict:
+    def get_stats(self, source: Optional[str] = None) -> dict:
         """Get labeling statistics."""
-        cursor = self.conn.execute("""
-            SELECT
-                COUNT(*) as total_labeled,
-                SUM(CASE WHEN skipped THEN 1 ELSE 0 END) as skipped,
-                AVG(CASE WHEN NOT skipped THEN sentiment_rating END) as avg_rating,
-                COUNT(DISTINCT thread_id) as unique_threads
-            FROM training_labels
-            WHERE labeler_id = ?
-        """, (self.labeler_id,))
+        if source:
+            cursor = self.conn.execute("""
+                SELECT
+                    COUNT(*) as total_labeled,
+                    SUM(CASE WHEN l.skipped THEN 1 ELSE 0 END) as skipped,
+                    AVG(CASE WHEN NOT l.skipped THEN l.sentiment_rating END) as avg_rating,
+                    COUNT(DISTINCT l.thread_id) as unique_threads
+                FROM training_labels l
+                JOIN thread_ops t ON l.thread_id = t.thread_id
+                WHERE l.labeler_id = ? AND t.source = ?
+            """, (self.labeler_id, source))
+        else:
+            cursor = self.conn.execute("""
+                SELECT
+                    COUNT(*) as total_labeled,
+                    SUM(CASE WHEN skipped THEN 1 ELSE 0 END) as skipped,
+                    AVG(CASE WHEN NOT skipped THEN sentiment_rating END) as avg_rating,
+                    COUNT(DISTINCT thread_id) as unique_threads
+                FROM training_labels
+                WHERE labeler_id = ?
+            """, (self.labeler_id,))
         row = cursor.fetchone()
         return {
             "total_labeled": row["total_labeled"] or 0,
@@ -185,11 +265,11 @@ class LabelingSession:
             "unique_threads": row["unique_threads"] or 0,
         }
 
-    def export_labels(self, output_path: str):
+    def export_labels(self, output_path: str, source: Optional[str] = None):
         """Export labels to CSV."""
         import csv
 
-        cursor = self.conn.execute("""
+        query = """
             SELECT
                 l.thread_id,
                 l.sentiment_rating,
@@ -201,32 +281,50 @@ class LabelingSession:
                 l.image_url_snapshot,
                 t.subject,
                 t.reply_count,
-                t.source
+                t.source,
+                date(t.created_at, 'unixepoch') as created_date
             FROM training_labels l
             JOIN thread_ops t ON l.thread_id = t.thread_id
-            ORDER BY l.labeled_at
-        """)
+        """
+        params = []
 
+        if source:
+            query += " WHERE t.source = ?"
+            params.append(source)
+
+        query += " ORDER BY l.labeled_at"
+
+        cursor = self.conn.execute(query, params)
+
+        count = 0
         with open(output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "thread_id", "sentiment_rating", "skipped", "notes", "labeler_id",
-                "labeled_at", "text_snapshot", "image_url", "subject", "reply_count", "source"
+                "labeled_at", "text_snapshot", "image_url", "subject", "reply_count",
+                "source", "created_date"
             ])
             for row in cursor:
                 writer.writerow(list(row))
+                count += 1
 
-        print(f"Exported {cursor.rowcount} labels to {output_path}")
+        print(f"Exported {count} labels to {output_path}")
 
 
 class LabelingGUI:
     """Tkinter GUI for labeling posts."""
 
-    def __init__(self, session: LabelingSession, posts: list[ThreadOP]):
+    def __init__(self, session: LabelingSession, posts: list[ThreadOP], source_filter: Optional[str] = None):
         self.session = session
         self.posts = posts
+        self.source_filter = source_filter
         self.current_index = 0
         self.current_note = ""
+
+        # Cache for performance
+        self._stats_cache = None
+        self._stats_dirty = True
+        self._image_cache = {}  # thread_id -> PhotoImage
 
         if not posts:
             print("No unlabeled posts found!")
@@ -239,6 +337,7 @@ class LabelingGUI:
 
         self._setup_ui()
         self._bind_keys()
+        self._preload_images()  # Preload first few images
         self._show_current_post()
 
     def _setup_ui(self):
@@ -318,11 +417,10 @@ class LabelingGUI:
         # Controls help
         help_text = """
 Controls:
-  1-9, 0    Rate (1=bearish ... 5=neutral ... 10=bullish)
-  S         Skip (not relevant)
-  Left/Right    Navigate posts
-  N         Add note
-  Q/Esc     Quit
+  1 = Very Bearish    2 = Bearish    3 = Neutral/Crab
+  4 = Bullish         5 = Very Bullish
+  0/S = Not relevant (skip)
+  Left/Right = Navigate    N = Add note    Q/Esc = Quit
         """
         self.help_label = ttk.Label(right_frame, text=help_text.strip(), style="TLabel", justify=tk.LEFT)
         self.help_label.pack(anchor=tk.W, pady=(10, 0))
@@ -339,10 +437,18 @@ Controls:
         self.root.bind("n", lambda e: self._add_note())
         self.root.bind("N", lambda e: self._add_note())
 
-        # Number keys for ratings
-        for i in range(1, 10):
+        # Number keys for ratings (1-5)
+        for i in range(1, 6):
             self.root.bind(str(i), lambda e, r=i: self._rate_post(r))
-        self.root.bind("0", lambda e: self._rate_post(10))
+        # 0 for skip
+        self.root.bind("0", lambda e: self._skip_post())
+
+    def _get_stats_cached(self):
+        """Get stats with caching to avoid DB queries on every navigation."""
+        if self._stats_dirty or self._stats_cache is None:
+            self._stats_cache = self.session.get_stats(self.source_filter)
+            self._stats_dirty = False
+        return self._stats_cache
 
     def _show_current_post(self):
         """Display the current post."""
@@ -351,13 +457,13 @@ Controls:
 
         post = self.posts[self.current_index]
 
-        # Update stats
-        stats = self.session.get_stats()
+        # Update stats (cached)
+        stats = self._get_stats_cached()
         self.stats_label.config(
             text=f"Labeled: {stats['total_labeled']} | Skipped: {stats['skipped']} | Avg: {stats['avg_rating'] or 'N/A'}"
         )
         self.progress_label.config(
-            text=f"Post {self.current_index + 1} / {len(self.posts)}"
+            text=f"{self.current_index + 1} / {len(self.posts)}"
         )
 
         # Thread info
@@ -365,7 +471,6 @@ Controls:
         self.subject_label.config(text=post.subject or "(no subject)")
 
         # Format timestamp
-        from datetime import datetime
         dt = datetime.fromtimestamp(post.created_at) if post.created_at else None
         date_str = dt.strftime("%Y-%m-%d %H:%M") if dt else "Unknown"
 
@@ -385,53 +490,116 @@ Controls:
             self.rating_label.config(text="SKIPPED", foreground="#888888")
         elif post.existing_rating:
             color = self._rating_color(post.existing_rating)
-            self.rating_label.config(text=f"Rating: {post.existing_rating}/10", foreground=color)
+            label = self._rating_label(post.existing_rating)
+            self.rating_label.config(text=f"{post.existing_rating}/5 - {label}", foreground=color)
         else:
             self.rating_label.config(text="Not rated", foreground="#666666")
 
-        # Load image
-        self._load_image(post.thumbnail_url or post.image_url)
+        # Load image (prefer local, fallback to URL)
+        self._load_image(post.local_thumbnail_path, post.thumbnail_url or post.image_url)
 
-    def _load_image(self, url: Optional[str]):
-        """Load and display image from URL."""
-        if not url or not PIL_AVAILABLE:
-            self.image_label.config(image="", text="No Image" if not url else "PIL not installed")
-            return
+    def _preload_images(self):
+        """Preload images for nearby posts."""
+        # Preload current and next few images
+        for i in range(min(3, len(self.posts))):
+            if i < len(self.posts):
+                post = self.posts[i]
+                self._get_cached_image(post.thread_id, post.local_thumbnail_path,
+                                      post.thumbnail_url or post.image_url)
 
-        try:
-            # Download image
-            with urlopen(url, timeout=5) as response:
-                image_data = response.read()
+    def _get_cached_image(self, thread_id: int, local_path: Optional[str], url: Optional[str]):
+        """Get image from cache or load it."""
+        if thread_id in self._image_cache:
+            return self._image_cache[thread_id]
 
-            # Open with PIL
-            image = Image.open(io.BytesIO(image_data))
+        if not PIL_AVAILABLE:
+            return None
 
-            # Resize to fit label (max 500x500)
-            max_size = (500, 600)
-            image.thumbnail(max_size, Image.Resampling.LANCZOS)
+        image = None
 
-            # Convert to PhotoImage
-            photo = ImageTk.PhotoImage(image)
+        # Try local file first
+        if local_path:
+            local_file = Path(local_path)
+            if local_file.exists():
+                try:
+                    image = Image.open(local_file)
+                except Exception:
+                    pass
 
-            # Update label (keep reference to prevent garbage collection)
+        # Fallback to URL if no local file
+        if image is None and url:
+            try:
+                with urlopen(url, timeout=5) as response:
+                    image_data = response.read()
+                image = Image.open(io.BytesIO(image_data))
+            except Exception:
+                pass
+
+        if image is None:
+            self._image_cache[thread_id] = None
+            return None
+
+        # Scale image to fit display area (scale UP or DOWN as needed)
+        target_width = 400
+        target_height = 500
+
+        # Calculate scale to fit while maintaining aspect ratio
+        width_ratio = target_width / image.width
+        height_ratio = target_height / image.height
+        scale = min(width_ratio, height_ratio)
+
+        # Apply scale (allows both enlarging and shrinking)
+        new_width = int(image.width * scale)
+        new_height = int(image.height * scale)
+
+        if new_width > 0 and new_height > 0:
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        photo = ImageTk.PhotoImage(image)
+        self._image_cache[thread_id] = photo
+        return photo
+
+    def _load_image(self, local_path: Optional[str], url: Optional[str]):
+        """Load and display image from local file or URL."""
+        post = self.posts[self.current_index]
+        photo = self._get_cached_image(post.thread_id, local_path, url)
+
+        if photo:
             self.image_label.config(image=photo, text="")
             self.image_label.image = photo
+        else:
+            self.image_label.config(image="", text="No Image")
 
-        except (URLError, Exception) as e:
-            self.image_label.config(image="", text=f"Failed to load image:\n{str(e)[:50]}")
+        # Preload next image in background
+        next_idx = self.current_index + 1
+        if next_idx < len(self.posts):
+            next_post = self.posts[next_idx]
+            if next_post.thread_id not in self._image_cache:
+                self.root.after(10, lambda: self._get_cached_image(
+                    next_post.thread_id, next_post.local_thumbnail_path,
+                    next_post.thumbnail_url or next_post.image_url))
 
     def _rating_color(self, rating: int) -> str:
         """Get color for rating display."""
-        if rating <= 3:
-            return "#ff4444"  # Red (bearish)
-        elif rating <= 4:
-            return "#ff8844"  # Orange
-        elif rating <= 6:
-            return "#888888"  # Gray (neutral)
-        elif rating <= 7:
-            return "#88cc44"  # Light green
-        else:
-            return "#44ff44"  # Green (bullish)
+        colors = {
+            1: "#ff4444",  # Red - Very bearish
+            2: "#ff8844",  # Orange - Bearish
+            3: "#888888",  # Gray - Neutral
+            4: "#88cc44",  # Light green - Bullish
+            5: "#44ff44",  # Green - Very bullish
+        }
+        return colors.get(rating, "#666666")
+
+    def _rating_label(self, rating: int) -> str:
+        """Get label for rating."""
+        labels = {
+            1: "Very Bearish",
+            2: "Bearish",
+            3: "Neutral",
+            4: "Bullish",
+            5: "Very Bullish",
+        }
+        return labels.get(rating, "Unknown")
 
     def _rate_post(self, rating: int):
         """Rate the current post."""
@@ -449,6 +617,9 @@ Controls:
         # Update post object
         post.existing_rating = rating
         post.existing_skipped = False
+
+        # Mark stats as needing refresh
+        self._stats_dirty = True
 
         # Clear note and move to next
         self.current_note = ""
@@ -470,6 +641,9 @@ Controls:
         # Update post object
         post.existing_rating = None
         post.existing_skipped = True
+
+        # Mark stats as needing refresh
+        self._stats_dirty = True
 
         # Clear note and move to next
         self.current_note = ""
@@ -495,7 +669,7 @@ Controls:
 
     def _quit(self):
         """Quit the application."""
-        stats = self.session.get_stats()
+        stats = self.session.get_stats(self.source_filter)
         if messagebox.askyesno(
             "Quit",
             f"Labeled {stats['total_labeled']} posts this session.\nQuit?"
@@ -522,6 +696,18 @@ def main():
         help="Maximum posts to load"
     )
     parser.add_argument(
+        "--source", choices=["live", "warosu"],
+        help="Filter by data source (live or warosu)"
+    )
+    parser.add_argument(
+        "--from", dest="date_from", metavar="DATE",
+        help="Filter posts from this date (YYYY-MM-DD)"
+    )
+    parser.add_argument(
+        "--to", dest="date_to", metavar="DATE",
+        help="Filter posts up to this date (YYYY-MM-DD)"
+    )
+    parser.add_argument(
         "--export", metavar="FILE",
         help="Export labels to CSV file and exit"
     )
@@ -539,9 +725,10 @@ def main():
     # Resolve database path
     db_path = Path(args.db)
     if not db_path.exists():
-        # Try relative to script location
-        script_dir = Path(__file__).parent.parent
-        db_path = script_dir / "data" / "posts.db"
+        # Try relative to project root (rust-scraper/data/posts.db)
+        script_dir = Path(__file__).parent.parent  # python-ml/
+        project_root = script_dir.parent  # bizcharts/
+        db_path = project_root / "rust-scraper" / "data" / "posts.db"
 
     if not db_path.exists():
         print(f"Database not found: {args.db}")
@@ -551,9 +738,11 @@ def main():
     session = LabelingSession(str(db_path), args.session)
 
     if args.stats:
-        stats = session.get_stats()
+        stats = session.get_stats(args.source)
         print("\nLabeling Statistics")
         print("=" * 40)
+        if args.source:
+            print(f"Source filter: {args.source}")
         print(f"Total labeled: {stats['total_labeled']}")
         print(f"Skipped: {stats['skipped']}")
         print(f"Average rating: {stats['avg_rating'] or 'N/A'}")
@@ -561,24 +750,38 @@ def main():
         return
 
     if args.export:
-        session.export_labels(args.export)
+        session.export_labels(args.export, args.source)
         return
 
     # Load posts
     if args.review:
-        posts = session.get_all_posts(args.limit)
+        posts = session.get_all_posts(args.limit, args.source, args.date_from, args.date_to)
     else:
-        posts = session.get_unlabeled_posts(args.limit)
+        posts = session.get_unlabeled_posts(args.limit, args.source, args.date_from, args.date_to)
 
     if not posts:
         print("No posts to label!")
+        if args.source:
+            print(f"(filtered by source: {args.source})")
+        if args.date_from or args.date_to:
+            print(f"(date range: {args.date_from or 'any'} to {args.date_to or 'any'})")
         print("Run the Rust scraper first to collect data, or use --review to review labeled posts.")
         sys.exit(0)
 
+    filter_info = []
+    if args.source:
+        filter_info.append(f"source={args.source}")
+    if args.date_from:
+        filter_info.append(f"from={args.date_from}")
+    if args.date_to:
+        filter_info.append(f"to={args.date_to}")
+
+    if filter_info:
+        print(f"Filters: {', '.join(filter_info)}")
     print(f"Loaded {len(posts)} posts for labeling")
 
     # Start GUI
-    gui = LabelingGUI(session, posts)
+    gui = LabelingGUI(session, posts, args.source)
     gui.run()
 
 

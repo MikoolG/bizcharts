@@ -10,7 +10,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::time::Duration;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -27,6 +30,7 @@ pub struct BizScraper {
     board: String,
     poll_interval: Duration,
     download_thumbnails: bool,
+    images_dir: PathBuf,
 }
 
 impl BizScraper {
@@ -42,12 +46,16 @@ impl BizScraper {
         let quota = Quota::per_second(NonZeroU32::new(config.scraper.rate_limit_per_second).unwrap());
         let rate_limiter = GovRateLimiter::direct(quota);
 
+        // Set up images directory
+        let images_dir = PathBuf::from(&config.database.images_dir);
+
         Ok(Self {
             client,
             rate_limiter,
             board: config.scraper.board.clone(),
             poll_interval: Duration::from_secs(config.scraper.poll_interval_seconds),
             download_thumbnails: config.scraper.download_thumbnails,
+            images_dir,
         })
     }
 
@@ -55,6 +63,12 @@ impl BizScraper {
     pub async fn run_forever(&self, db: &Database) -> Result<()> {
         info!("Starting catalog-only scraper for /{}/", self.board);
         info!("Poll interval: {}s", self.poll_interval.as_secs());
+
+        // Ensure images directory exists
+        if self.download_thumbnails {
+            fs::create_dir_all(&self.images_dir).await?;
+            info!("Thumbnails will be saved to: {:?}", self.images_dir);
+        }
 
         loop {
             match self.scrape_catalog(db).await {
@@ -134,6 +148,24 @@ impl BizScraper {
 
                 if is_new {
                     stats.new_threads += 1;
+
+                    // Download thumbnail for new threads with images
+                    if self.download_thumbnails && thread_op.has_image {
+                        if let Some(ref thumb_url) = thread_op.thumbnail_url {
+                            match self.download_thumbnail(thread_op.thread_id, thumb_url).await {
+                                Ok(local_path) => {
+                                    // Update the database with local path
+                                    let path_str = local_path.to_string_lossy().to_string();
+                                    if let Err(e) = db.update_thumbnail_path(thread_op.thread_id, &path_str) {
+                                        warn!("Failed to update thumbnail path: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to download thumbnail for {}: {}", thread_op.thread_id, e);
+                                }
+                            }
+                        }
+                    }
                 } else {
                     stats.updated_threads += 1;
                 }
@@ -200,6 +232,7 @@ impl BizScraper {
             has_image: thread.tim.is_some(),
             image_url,
             thumbnail_url,
+            local_thumbnail_path: None, // Set after download
             image_md5: thread.md5.clone(),
             image_filename: thread.filename.clone(),
             image_width: thread.w,
@@ -217,6 +250,30 @@ impl BizScraper {
             is_closed: thread.closed.unwrap_or(0) == 1,
             source: "live".to_string(),
         }
+    }
+
+    /// Download thumbnail and return the local path
+    async fn download_thumbnail(&self, thread_id: i64, thumbnail_url: &str) -> Result<PathBuf> {
+        // Rate limit image downloads
+        self.rate_limiter.until_ready().await;
+
+        debug!("Downloading thumbnail for thread {}", thread_id);
+
+        let response = self.client.get(thumbnail_url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Thumbnail download failed: {}", response.status()));
+        }
+
+        let bytes = response.bytes().await?;
+
+        // Save to local file: data/images/{thread_id}.jpg
+        let local_path = self.images_dir.join(format!("{}.jpg", thread_id));
+        let mut file = fs::File::create(&local_path).await?;
+        file.write_all(&bytes).await?;
+
+        debug!("Saved thumbnail to {:?}", local_path);
+        Ok(local_path)
     }
 }
 

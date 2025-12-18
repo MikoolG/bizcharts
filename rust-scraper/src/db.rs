@@ -53,6 +53,7 @@ impl Database {
                 has_image BOOLEAN DEFAULT FALSE,
                 image_url TEXT,                  -- Full image URL
                 thumbnail_url TEXT,              -- Thumbnail URL
+                local_thumbnail_path TEXT,       -- Local path to downloaded thumbnail
                 image_md5 TEXT,                  -- For deduplication
                 image_filename TEXT,             -- Original filename (may contain coin hints)
                 image_width INTEGER,
@@ -159,6 +160,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_labels_rating ON training_labels(sentiment_rating);
             CREATE INDEX IF NOT EXISTS idx_labels_labeled ON training_labels(labeled_at);
 
+            -- Migration: Add local_thumbnail_path if not exists (for existing databases)
+            -- SQLite doesn't have IF NOT EXISTS for ALTER TABLE, so we ignore errors
+
             -- Legacy posts table (kept for backward compatibility, may be removed)
             CREATE TABLE IF NOT EXISTS posts (
                 post_id INTEGER PRIMARY KEY,
@@ -191,6 +195,13 @@ impl Database {
             "#,
         )?;
 
+        // Migration: Add local_thumbnail_path column if it doesn't exist
+        // SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we try and ignore errors
+        let _ = self.conn.execute(
+            "ALTER TABLE thread_ops ADD COLUMN local_thumbnail_path TEXT",
+            [],
+        );
+
         Ok(())
     }
 
@@ -213,7 +224,7 @@ impl Database {
             r#"
             INSERT INTO thread_ops (
                 thread_id, subject, board, op_text, op_text_clean, op_name, op_tripcode,
-                has_image, image_url, thumbnail_url, image_md5, image_filename,
+                has_image, image_url, thumbnail_url, local_thumbnail_path, image_md5, image_filename,
                 image_width, image_height, image_size,
                 created_at, last_modified, first_seen_at, last_seen_at,
                 reply_count, image_count, unique_ips, page_position,
@@ -221,12 +232,12 @@ impl Database {
                 source
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15,
-                ?16, ?17, COALESCE((SELECT first_seen_at FROM thread_ops WHERE thread_id = ?1), ?18), ?19,
-                ?20, ?21, ?22, ?23,
-                ?24, ?25, ?26, ?27,
-                ?28
+                ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16,
+                ?17, ?18, COALESCE((SELECT first_seen_at FROM thread_ops WHERE thread_id = ?1), ?19), ?20,
+                ?21, ?22, ?23, ?24,
+                ?25, ?26, ?27, ?28,
+                ?29
             )
             ON CONFLICT(thread_id) DO UPDATE SET
                 last_modified = excluded.last_modified,
@@ -239,6 +250,8 @@ impl Database {
                 image_limit_reached = excluded.image_limit_reached,
                 is_sticky = excluded.is_sticky,
                 is_closed = excluded.is_closed,
+                -- Update local thumbnail path if newly downloaded
+                local_thumbnail_path = COALESCE(excluded.local_thumbnail_path, local_thumbnail_path),
                 -- Mark for reanalysis if reply count changed significantly
                 needs_reanalysis = CASE
                     WHEN excluded.reply_count > reply_count + 10 THEN 1
@@ -247,7 +260,7 @@ impl Database {
             "#,
             params![
                 op.thread_id, op.subject, op.board, op.op_text, op.op_text_clean, op.op_name, op.op_tripcode,
-                op.has_image, op.image_url, op.thumbnail_url, op.image_md5, op.image_filename,
+                op.has_image, op.image_url, op.thumbnail_url, op.local_thumbnail_path, op.image_md5, op.image_filename,
                 op.image_width, op.image_height, op.image_size,
                 op.created_at, op.last_modified, now, now,
                 op.reply_count, op.image_count, op.unique_ips, op.page_position,
@@ -320,6 +333,103 @@ impl Database {
         Ok(())
     }
 
+    /// Update the local thumbnail path for a thread
+    pub fn update_thumbnail_path(&self, thread_id: i64, path: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE thread_ops SET local_thumbnail_path = ?1 WHERE thread_id = ?2",
+            params![path, thread_id],
+        )?;
+        Ok(())
+    }
+
+    // === Import Coverage Analysis ===
+
+    /// Get coverage statistics by source
+    pub fn get_coverage_by_source(&self) -> Result<Vec<SourceCoverage>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                source,
+                COUNT(*) as thread_count,
+                MIN(created_at) as oldest_timestamp,
+                MAX(created_at) as newest_timestamp,
+                COUNT(CASE WHEN has_image THEN 1 END) as with_images,
+                COUNT(CASE WHEN local_thumbnail_path IS NOT NULL THEN 1 END) as with_local_images
+            FROM thread_ops
+            GROUP BY source
+            ORDER BY source
+            "#
+        )?;
+
+        let results = stmt.query_map([], |row| {
+            Ok(SourceCoverage {
+                source: row.get(0)?,
+                thread_count: row.get(1)?,
+                oldest_timestamp: row.get(2)?,
+                newest_timestamp: row.get(3)?,
+                with_images: row.get(4)?,
+                with_local_images: row.get(5)?,
+            })
+        })?;
+
+        results.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Get daily thread counts for a source (for gap detection)
+    pub fn get_daily_coverage(&self, source: &str, limit: i32) -> Result<Vec<DailyCoverage>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                date(created_at, 'unixepoch') as date,
+                COUNT(*) as thread_count
+            FROM thread_ops
+            WHERE source = ?1
+            GROUP BY date
+            ORDER BY date DESC
+            LIMIT ?2
+            "#
+        )?;
+
+        let results = stmt.query_map(params![source, limit], |row| {
+            Ok(DailyCoverage {
+                date: row.get(0)?,
+                thread_count: row.get(1)?,
+            })
+        })?;
+
+        results.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Get the newest thread timestamp for a source (for continuation)
+    pub fn get_newest_timestamp(&self, source: &str) -> Result<Option<i64>> {
+        let result: Option<i64> = self.conn.query_row(
+            "SELECT MAX(created_at) FROM thread_ops WHERE source = ?1",
+            params![source],
+            |row| row.get(0),
+        ).ok().flatten();
+        Ok(result)
+    }
+
+    /// Get the oldest thread timestamp for a source (for backfilling)
+    pub fn get_oldest_timestamp(&self, source: &str) -> Result<Option<i64>> {
+        let result: Option<i64> = self.conn.query_row(
+            "SELECT MIN(created_at) FROM thread_ops WHERE source = ?1",
+            params![source],
+            |row| row.get(0),
+        ).ok().flatten();
+        Ok(result)
+    }
+
+    /// Check if a thread already exists
+    pub fn thread_exists(&self, thread_id: i64) -> Result<bool> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM thread_ops WHERE thread_id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Save a catalog snapshot for historical tracking
     pub fn save_catalog_snapshot(&self, total: i32, with_images: i32, avg_replies: f64, top_coins: &str) -> Result<()> {
         let now = std::time::SystemTime::now()
@@ -340,7 +450,7 @@ impl Database {
     pub fn get_thread_op(&self, thread_id: i64) -> Result<Option<ThreadOp>> {
         let result = self.conn.query_row(
             "SELECT thread_id, subject, board, op_text, op_text_clean, op_name, op_tripcode,
-                    has_image, image_url, thumbnail_url, image_md5, image_filename,
+                    has_image, image_url, thumbnail_url, local_thumbnail_path, image_md5, image_filename,
                     image_width, image_height, image_size,
                     created_at, last_modified, reply_count, image_count, unique_ips, page_position,
                     bump_limit_reached, image_limit_reached, is_sticky, is_closed, source
@@ -358,22 +468,23 @@ impl Database {
                     has_image: row.get(7)?,
                     image_url: row.get(8)?,
                     thumbnail_url: row.get(9)?,
-                    image_md5: row.get(10)?,
-                    image_filename: row.get(11)?,
-                    image_width: row.get(12)?,
-                    image_height: row.get(13)?,
-                    image_size: row.get(14)?,
-                    created_at: row.get(15)?,
-                    last_modified: row.get(16)?,
-                    reply_count: row.get(17)?,
-                    image_count: row.get(18)?,
-                    unique_ips: row.get(19)?,
-                    page_position: row.get(20)?,
-                    bump_limit_reached: row.get(21)?,
-                    image_limit_reached: row.get(22)?,
-                    is_sticky: row.get(23)?,
-                    is_closed: row.get(24)?,
-                    source: row.get(25)?,
+                    local_thumbnail_path: row.get(10)?,
+                    image_md5: row.get(11)?,
+                    image_filename: row.get(12)?,
+                    image_width: row.get(13)?,
+                    image_height: row.get(14)?,
+                    image_size: row.get(15)?,
+                    created_at: row.get(16)?,
+                    last_modified: row.get(17)?,
+                    reply_count: row.get(18)?,
+                    image_count: row.get(19)?,
+                    unique_ips: row.get(20)?,
+                    page_position: row.get(21)?,
+                    bump_limit_reached: row.get(22)?,
+                    image_limit_reached: row.get(23)?,
+                    is_sticky: row.get(24)?,
+                    is_closed: row.get(25)?,
+                    source: row.get(26)?,
                 })
             },
         );
@@ -495,6 +606,7 @@ pub struct ThreadOp {
     pub has_image: bool,
     pub image_url: Option<String>,
     pub thumbnail_url: Option<String>,
+    pub local_thumbnail_path: Option<String>,
     pub image_md5: Option<String>,
     pub image_filename: Option<String>,
     pub image_width: Option<i32>,
@@ -526,6 +638,7 @@ impl Default for ThreadOp {
             has_image: false,
             image_url: None,
             thumbnail_url: None,
+            local_thumbnail_path: None,
             image_md5: None,
             image_filename: None,
             image_width: None,
@@ -599,4 +712,24 @@ impl CoinMention {
         self.source = source.to_string();
         self
     }
+}
+
+// === Coverage Analysis Structures ===
+
+/// Coverage statistics for a data source
+#[derive(Debug, Clone)]
+pub struct SourceCoverage {
+    pub source: String,
+    pub thread_count: i64,
+    pub oldest_timestamp: Option<i64>,
+    pub newest_timestamp: Option<i64>,
+    pub with_images: i64,
+    pub with_local_images: i64,
+}
+
+/// Daily thread count for gap analysis
+#[derive(Debug, Clone)]
+pub struct DailyCoverage {
+    pub date: String,
+    pub thread_count: i64,
 }

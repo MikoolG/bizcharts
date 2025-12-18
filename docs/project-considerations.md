@@ -63,9 +63,16 @@ biz-scraper --warosu --search bitcoin --max 1000
 
 # Import threads from date range
 biz-scraper --warosu --from 2024-01-01 --to 2024-12-31
+
+# Check data coverage before importing
+biz-scraper --coverage
+
+# Incremental imports (continues from where you left off)
+biz-scraper --warosu --continue   # Import newer data from last date
+biz-scraper --warosu --backfill   # Import older data before earliest
 ```
 
-The `source` field in the database tracks data origin (`live` vs `warosu`) for analysis purposes.
+The `source` field in the database tracks data origin (`live` vs `warosu`) for analysis purposes. The `--coverage` command shows date ranges you have and suggests import commands.
 
 ## Meme image analysis combines detection, classification, and OCR
 

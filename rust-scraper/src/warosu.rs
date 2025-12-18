@@ -16,7 +16,10 @@ use reqwest::Client;
 #[allow(unused_imports)]
 use scraper::{Html, Selector};
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::time::Duration;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 
 use crate::db::{Database, ThreadOp};
@@ -31,6 +34,7 @@ pub struct WarosuScraper {
     client: Client,
     rate_limiter: GovRateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>,
     board: String,
+    images_dir: PathBuf,
 }
 
 /// Parsed thread data from Warosu
@@ -67,7 +71,7 @@ pub struct SearchParams {
 
 impl WarosuScraper {
     /// Create new Warosu scraper instance
-    pub fn new(board: &str) -> Result<Self> {
+    pub fn new(board: &str, images_dir: &str) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .gzip(true)
@@ -83,7 +87,32 @@ impl WarosuScraper {
             client,
             rate_limiter,
             board: board.to_string(),
+            images_dir: PathBuf::from(images_dir),
         })
+    }
+
+    /// Download thumbnail from Warosu and return local path
+    async fn download_thumbnail(&self, thread_id: i64, thumbnail_url: &str) -> Result<PathBuf> {
+        // Rate limit image downloads
+        self.rate_limiter.until_ready().await;
+
+        debug!("Downloading Warosu thumbnail for thread {}", thread_id);
+
+        let response = self.client.get(thumbnail_url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Thumbnail download failed: {}", response.status()));
+        }
+
+        let bytes = response.bytes().await?;
+
+        // Save to local file: data/images/{thread_id}.jpg
+        let local_path = self.images_dir.join(format!("{}.jpg", thread_id));
+        let mut file = fs::File::create(&local_path).await?;
+        file.write_all(&bytes).await?;
+
+        debug!("Saved thumbnail to {:?}", local_path);
+        Ok(local_path)
     }
 
     /// Search for threads matching criteria
@@ -123,7 +152,6 @@ impl WarosuScraper {
     }
 
     /// Browse archived threads by page number
-    #[allow(dead_code)]
     pub async fn browse_page(&self, page: u32) -> Result<Vec<WarosuThread>> {
         self.rate_limiter.until_ready().await;
 
@@ -171,6 +199,9 @@ impl WarosuScraper {
         let mut stats = ImportStats::default();
         let mut offset = params.offset;
 
+        // Ensure images directory exists
+        fs::create_dir_all(&self.images_dir).await?;
+
         info!("Starting Warosu historical import (max: {} threads)", max_threads);
 
         loop {
@@ -214,6 +245,23 @@ impl WarosuScraper {
                         db.insert_op_mentions(thread_op.thread_id, &mentions)?;
                         stats.mentions_added += mentions.len();
                     }
+
+                    // Download thumbnail for new threads with images
+                    if thread_op.has_image {
+                        if let Some(ref thumb_url) = thread_op.thumbnail_url {
+                            match self.download_thumbnail(thread_op.thread_id, thumb_url).await {
+                                Ok(local_path) => {
+                                    let path_str = local_path.to_string_lossy().to_string();
+                                    if let Err(e) = db.update_thumbnail_path(thread_op.thread_id, &path_str) {
+                                        warn!("Failed to update thumbnail path: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to download thumbnail for {}: {}", thread_op.thread_id, e);
+                                }
+                            }
+                        }
+                    }
                 } else {
                     stats.skipped += 1;
                 }
@@ -239,6 +287,96 @@ impl WarosuScraper {
         Ok(stats)
     }
 
+    /// Import threads by browsing pages (general activity, no search filter)
+    pub async fn import_by_pages(
+        &self,
+        db: &Database,
+        num_pages: u32,
+    ) -> Result<ImportStats> {
+        let mut stats = ImportStats::default();
+
+        // Ensure images directory exists
+        fs::create_dir_all(&self.images_dir).await?;
+
+        info!("Starting Warosu page browse (pages: {})", num_pages);
+
+        for page in 1..=num_pages {
+            info!("Fetching page {}/{}", page, num_pages);
+
+            let threads = match self.browse_page(page).await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Failed to fetch page {}: {}", page, e);
+                    continue;
+                }
+            };
+
+            if threads.is_empty() {
+                debug!("No threads found on page {}", page);
+                continue;
+            }
+
+            for thread in &threads {
+                // Convert to ThreadOp and store
+                let thread_op = self.warosu_to_thread_op(thread);
+
+                // Extract coin mentions
+                let mut mentions = Vec::new();
+                if let Some(ref text) = thread_op.op_text {
+                    mentions.extend(extract_coins(text).into_iter().map(|m| m.with_source("text")));
+                }
+                if let Some(ref subject) = thread_op.subject {
+                    for mention in extract_coins(subject) {
+                        if !mentions.iter().any(|m| m.symbol == mention.symbol) {
+                            mentions.push(mention.with_source("subject"));
+                        }
+                    }
+                }
+
+                let is_new = db.upsert_thread_op(&thread_op)?;
+
+                if is_new {
+                    stats.new_threads += 1;
+                    if !mentions.is_empty() {
+                        db.insert_op_mentions(thread_op.thread_id, &mentions)?;
+                        stats.mentions_added += mentions.len();
+                    }
+
+                    // Download thumbnail for new threads with images
+                    if thread_op.has_image {
+                        if let Some(ref thumb_url) = thread_op.thumbnail_url {
+                            match self.download_thumbnail(thread_op.thread_id, thumb_url).await {
+                                Ok(local_path) => {
+                                    let path_str = local_path.to_string_lossy().to_string();
+                                    if let Err(e) = db.update_thumbnail_path(thread_op.thread_id, &path_str) {
+                                        warn!("Failed to update thumbnail path: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to download thumbnail for {}: {}", thread_op.thread_id, e);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    stats.skipped += 1;
+                }
+
+                stats.total += 1;
+            }
+
+            // Brief pause between pages
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        info!(
+            "Warosu page browse complete: {} total, {} new, {} skipped, {} mentions",
+            stats.total, stats.new_threads, stats.skipped, stats.mentions_added
+        );
+
+        Ok(stats)
+    }
+
     /// Parse search results HTML
     fn parse_search_results(&self, html: &str) -> Result<Vec<WarosuThread>> {
         let _document = Html::parse_document(html);
@@ -249,13 +387,18 @@ impl WarosuScraper {
         // is inconsistent. The scraper crate selectors are kept for potential future use.
 
         // Parse using regex since Warosu HTML is messy
+        // Extract thread ID and timestamp from title attribute (Unix ms)
+        // HTML order: title=1766048571000 ... No.61508089</a> [<a href=.../Reply</a>]
+        // Only capture thread OPs (have [Reply] link), not replies
         let thread_regex = regex::Regex::new(
-            r#"No\.(\d+).*?(\w+,\s+\w+\s+\d+,\s+\d+\s+\d+:\d+:\d+)"#
+            r#"title=(\d{13}).*?No\.(\d+)</a>\s*\[<a href=/biz/thread/\d+>Reply</a>\]"#
         ).unwrap();
 
         for cap in thread_regex.captures_iter(html) {
-            if let Ok(thread_id) = cap[1].parse::<i64>() {
-                let timestamp = self.parse_warosu_timestamp(&cap[2]).unwrap_or(0);
+            // cap[1] = timestamp (13 digits), cap[2] = thread_id
+            if let Ok(thread_id) = cap[2].parse::<i64>() {
+                // Timestamp in title is Unix milliseconds
+                let timestamp = cap[1].parse::<i64>().unwrap_or(0) / 1000;
 
                 threads.push(WarosuThread {
                     thread_id,
@@ -281,89 +424,98 @@ impl WarosuScraper {
     }
 
     /// Parse index/browse page HTML
-    #[allow(dead_code)]
     fn parse_index_page(&self, html: &str) -> Result<Vec<WarosuThread>> {
-        let _document = Html::parse_document(html);
         let mut threads = Vec::new();
 
-        // Look for thread containers
-        // Warosu format: "No.12345678" followed by timestamp and content
+        // Thread OPs are in <div class=comment id=p{thread_id}> containers
+        // followed by <br class=newthr> separators
+        // Key structure for OPs:
+        //   <div class=comment id=p61508089>
+        //     ...
+        //     <span class=posttime title=1766048430000>...</span>
+        //     ...
+        //     No.61508089</a> [<a href=/biz/thread/61508089>Reply</a>]
+        //     <blockquote>...</blockquote>
+        //   </div>
+        //
+        // Replies are in <td class="comment reply" id=p...> (note "reply" class)
 
-        // Use regex to extract structured data from the messy HTML
-        let _thread_regex = regex::Regex::new(
-            r#"No\.(\d+).*?(\w+,\s+\w+\s+\d+,\s+\d+\s+\d+:\d+:\d+).*?(?:<blockquote[^>]*>|<p>|</a>\s*)(.*?)(?:</blockquote>|</p>|<br|<span)"#
+        // Split by thread OP containers (div with just "comment" class, not "comment reply")
+        let op_container_regex = regex::Regex::new(
+            r#"<div class=comment id=p(\d+)>([\s\S]*?)(?:<br class=newthr>|<table>)"#
         ).unwrap();
 
         let subject_regex = regex::Regex::new(
-            r#"<span[^>]*class="[^"]*subject[^"]*"[^>]*>([^<]+)</span>"#
+            r#"<span[^>]*class="[^"]*(?:subject|filetitle)[^"]*"[^>]*>([^<]+)</span>"#
         ).unwrap();
 
+        // Note: Warosu HTML doesn't quote attribute values, so we match without quotes
         let image_regex = regex::Regex::new(
-            r#"href="(https?://i\.warosu\.org/data/biz/img/[^"]+)""#
+            r#"href=(https?://i\.warosu\.org/data/biz/img/[^\s>]+)"#
         ).unwrap();
 
         let thumb_regex = regex::Regex::new(
-            r#"src="(https?://i\.warosu\.org/data/biz/thumb/[^"]+)""#
+            r#"src=(https?://i\.warosu\.org/data/biz/thumb/[^\s>]+)"#
         ).unwrap();
 
         let replies_regex = regex::Regex::new(
             r#"(\d+)\s+repl(?:y|ies)\s+omitted"#
         ).unwrap();
 
-        // Split by thread boundaries and parse each
-        let thread_sections: Vec<&str> = html.split("No.").collect();
+        let ts_regex = regex::Regex::new(r"title=(\d{13})").unwrap();
+        let text_regex = regex::Regex::new(r"<blockquote[^>]*>([\s\S]*?)</blockquote>").unwrap();
 
-        for section in thread_sections.iter().skip(1) {
-            // Extract thread ID (first numeric sequence)
-            let id_match = regex::Regex::new(r"^(\d+)").unwrap();
-            if let Some(cap) = id_match.captures(section) {
-                if let Ok(thread_id) = cap[1].parse::<i64>() {
-                    let mut thread = WarosuThread {
-                        thread_id,
-                        subject: None,
-                        op_text: None,
-                        op_name: Some("Anonymous".to_string()),
-                        op_tripcode: None,
-                        timestamp: 0,
-                        image_url: None,
-                        thumbnail_url: None,
-                        image_filename: None,
-                        reply_count: None,
-                    };
+        for cap in op_container_regex.captures_iter(html) {
+            if let Ok(thread_id) = cap[1].parse::<i64>() {
+                let section = &cap[2];
 
-                    // Extract timestamp
-                    let ts_regex = regex::Regex::new(r"(\w+,\s+\w+\s+\d+,\s+\d+\s+\d+:\d+:\d+)").unwrap();
-                    if let Some(ts_cap) = ts_regex.captures(section) {
-                        thread.timestamp = self.parse_warosu_timestamp(&ts_cap[1]).unwrap_or(0);
-                    }
-
-                    // Extract subject
-                    if let Some(subj_cap) = subject_regex.captures(section) {
-                        thread.subject = Some(html_escape::decode_html_entities(&subj_cap[1]).to_string());
-                    }
-
-                    // Extract image URLs
-                    if let Some(img_cap) = image_regex.captures(section) {
-                        thread.image_url = Some(img_cap[1].to_string());
-                    }
-                    if let Some(thumb_cap) = thumb_regex.captures(section) {
-                        thread.thumbnail_url = Some(thumb_cap[1].to_string());
-                    }
-
-                    // Extract reply count
-                    if let Some(reply_cap) = replies_regex.captures(section) {
-                        thread.reply_count = reply_cap[1].parse().ok();
-                    }
-
-                    // Extract OP text (look for blockquote or paragraph content)
-                    let text_regex = regex::Regex::new(r"(?:<blockquote[^>]*>|<p[^>]*>)([\s\S]*?)(?:</blockquote>|</p>)").unwrap();
-                    if let Some(text_cap) = text_regex.captures(section) {
-                        let raw_text = &text_cap[1];
-                        thread.op_text = Some(strip_html_warosu(raw_text));
-                    }
-
-                    threads.push(thread);
+                // Verify this is really an OP by checking for [Reply] link
+                if !section.contains(&format!("href=/biz/thread/{}>Reply", thread_id)) {
+                    continue;
                 }
+
+                let mut thread = WarosuThread {
+                    thread_id,
+                    subject: None,
+                    op_text: None,
+                    op_name: Some("Anonymous".to_string()),
+                    op_tripcode: None,
+                    timestamp: 0,
+                    image_url: None,
+                    thumbnail_url: None,
+                    image_filename: None,
+                    reply_count: None,
+                };
+
+                // Extract timestamp from title attribute (Unix milliseconds)
+                if let Some(ts_cap) = ts_regex.captures(section) {
+                    thread.timestamp = ts_cap[1].parse::<i64>().unwrap_or(0) / 1000;
+                }
+
+                // Extract subject
+                if let Some(subj_cap) = subject_regex.captures(section) {
+                    thread.subject = Some(html_escape::decode_html_entities(&subj_cap[1]).to_string());
+                }
+
+                // Extract image URLs
+                if let Some(img_cap) = image_regex.captures(section) {
+                    thread.image_url = Some(img_cap[1].to_string());
+                }
+                if let Some(thumb_cap) = thumb_regex.captures(section) {
+                    thread.thumbnail_url = Some(thumb_cap[1].to_string());
+                }
+
+                // Extract reply count from "X replies omitted"
+                if let Some(reply_cap) = replies_regex.captures(section) {
+                    thread.reply_count = reply_cap[1].parse().ok();
+                }
+
+                // Extract OP text from blockquote
+                if let Some(text_cap) = text_regex.captures(section) {
+                    thread.op_text = Some(strip_html_warosu(&text_cap[1]));
+                }
+
+                threads.push(thread);
             }
         }
 
@@ -387,10 +539,10 @@ impl WarosuScraper {
             reply_count: None,
         };
 
-        // Extract timestamp
-        let ts_regex = regex::Regex::new(r"(\w+,\s+\w+\s+\d+,\s+\d+\s+\d+:\d+:\d+)").unwrap();
+        // Extract timestamp from title attribute (Unix milliseconds)
+        let ts_regex = regex::Regex::new(r"title=(\d{13})").unwrap();
         if let Some(cap) = ts_regex.captures(html) {
-            thread.timestamp = self.parse_warosu_timestamp(&cap[1]).unwrap_or(0);
+            thread.timestamp = cap[1].parse::<i64>().unwrap_or(0) / 1000;
         }
 
         // Extract subject
@@ -505,6 +657,7 @@ impl WarosuScraper {
             has_image: thread.image_url.is_some(),
             image_url: thread.image_url.clone(),
             thumbnail_url: thread.thumbnail_url.clone(),
+            local_thumbnail_path: None, // Set after download
             image_md5: None, // Warosu doesn't expose this
             image_filename: thread.image_filename.clone(),
             image_width: None,
