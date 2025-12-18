@@ -59,6 +59,27 @@ python -m src.labeler --from 2024-01-01 --to 2024-06-30
 python -m src.labeler --source warosu --from 2024-01-01 --to 2024-03-31
 ```
 
+### Active Learning Mode
+
+Once you have trained an initial model (200+ labels), use active learning to prioritize the most valuable posts to label:
+
+```bash
+# Use trained SetFit model for priority ordering
+python -m src.labeler --active-learning --model models/setfit
+
+# Customize candidate pool size
+python -m src.labeler --active-learning --pool-size 2000 --limit 100
+
+# Combine with source filtering
+python -m src.labeler --active-learning --source live
+```
+
+Active learning uses **hybrid uncertainty-diversity sampling**:
+- **Uncertainty**: Selects posts where the model is least confident
+- **Diversity**: Ensures coverage across different topics via clustering
+
+This approach provides 500 well-selected labels equivalent to ~2,000 random labels.
+
 ### Export & Statistics
 
 ```bash
@@ -198,9 +219,31 @@ print(f"Correlation: {correlation:.3f}")
 warosu_df = df[df['source'] == 'warosu']
 ```
 
-### Training
+### Training ML Models
 
-If building a supervised model:
+The self-training system uses your labels to train sentiment models:
+
+```bash
+# Train SetFit model (few-shot learning, ~5 min)
+cd python-ml
+python -m src.training.setfit_trainer --db ../data/posts.db --output models/setfit
+
+# Or use RunPod for GPU training
+# Upload data to /workspace/data/posts.db, then:
+python train_setfit.py --db /workspace/data/posts.db --output /workspace/models/setfit
+```
+
+The training pipeline automatically:
+1. Loads labels from `training_labels` table
+2. Maps 1-5 ratings to bearish/neutral/bullish (1-2=bearish, 3=neutral, 4-5=bullish)
+3. Splits data 80/20 for train/test
+4. Reports accuracy and F1 scores
+
+See [self-training.md](self-training.md) for the full ML architecture.
+
+### Manual Data Export
+
+If building a custom model:
 
 ```python
 # Export for training

@@ -11,6 +11,7 @@ Usage:
     python -m src.labeler --from 2024-01-01 --to 2024-06-30  # Date range
     python -m src.labeler --session my_session      # Named labeling session
     python -m src.labeler --export labels.csv       # Export labeled data
+    python -m src.labeler --active-learning --model models/setfit  # Priority ordering
 
 Controls:
     1       : Very bearish (strong sell signals, panic, despair)
@@ -681,6 +682,71 @@ Controls:
         self.root.mainloop()
 
 
+def _load_active_learning_posts(
+    session: LabelingSession,
+    db_path: str,
+    model_path: str,
+    limit: int,
+    pool_size: int,
+    source: Optional[str],
+) -> list[ThreadOP]:
+    """Load posts ordered by active learning priority.
+
+    Uses hybrid uncertainty-diversity sampling to prioritize posts that will
+    provide maximum information gain when labeled.
+    """
+    from pathlib import Path
+
+    model_dir = Path(model_path)
+    if not model_dir.exists():
+        print(f"Model not found at {model_path}")
+        print("Train a model first using: python -m src.training.setfit_trainer --db <db>")
+        print("Falling back to default ordering...")
+        return session.get_unlabeled_posts(limit, source)
+
+    try:
+        from .active_learning.labeler_integration import ActiveLearningLabeler
+        from .models.setfit_model import SetFitSentimentModel
+
+        print(f"Loading model from {model_path}...")
+        model = SetFitSentimentModel(model_path=model_path)
+
+        print(f"Running active learning acquisition on {pool_size} candidates...")
+        al = ActiveLearningLabeler(db_path, model=model)
+
+        # Get posts from database
+        all_posts = session.get_unlabeled_posts(pool_size, source)
+        if not all_posts:
+            return []
+
+        # Get suggested thread IDs in priority order
+        thread_ids = [p.thread_id for p in all_posts]
+        texts = [p.op_text_clean or p.op_text or "" for p in all_posts]
+
+        # Run acquisition
+        probs = model.predict_proba(texts)
+        embeddings = model.get_embeddings(texts)
+
+        from .active_learning.acquisition import hybrid_acquisition
+
+        selected_indices = hybrid_acquisition(probs, embeddings, n_select=limit)
+
+        # Reorder posts by selected indices
+        posts = [all_posts[i] for i in selected_indices]
+
+        print(f"Active learning: selected {len(posts)} posts from {len(all_posts)} candidates")
+        return posts
+
+    except ImportError as e:
+        print(f"Active learning not available: {e}")
+        print("Falling back to default ordering...")
+        return session.get_unlabeled_posts(limit, source)
+    except Exception as e:
+        print(f"Active learning failed: {e}")
+        print("Falling back to default ordering...")
+        return session.get_unlabeled_posts(limit, source)
+
+
 def main():
     parser = argparse.ArgumentParser(description="BizCharts Sentiment Labeling Tool")
     parser.add_argument(
@@ -719,6 +785,18 @@ def main():
         "--stats", action="store_true",
         help="Show labeling statistics and exit"
     )
+    parser.add_argument(
+        "--active-learning", action="store_true",
+        help="Order posts by active learning priority (uncertainty + diversity)"
+    )
+    parser.add_argument(
+        "--model", default="models/setfit",
+        help="Path to trained model for active learning (default: models/setfit)"
+    )
+    parser.add_argument(
+        "--pool-size", type=int, default=1000,
+        help="Candidate pool size for active learning (default: 1000)"
+    )
 
     args = parser.parse_args()
 
@@ -756,6 +834,15 @@ def main():
     # Load posts
     if args.review:
         posts = session.get_all_posts(args.limit, args.source, args.date_from, args.date_to)
+    elif args.active_learning:
+        posts = _load_active_learning_posts(
+            session=session,
+            db_path=str(db_path),
+            model_path=args.model,
+            limit=args.limit,
+            pool_size=args.pool_size,
+            source=args.source,
+        )
     else:
         posts = session.get_unlabeled_posts(args.limit, args.source, args.date_from, args.date_to)
 

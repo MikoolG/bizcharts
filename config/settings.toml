@@ -200,3 +200,103 @@ shift_threshold = 15
 
 # Alert cooldown (seconds) - don't spam alerts
 cooldown_seconds = 3600
+
+# ============================================================================
+# ML TRAINING CONFIGURATION
+# ============================================================================
+
+[ml.models]
+# Paths to trained model directories
+setfit_path = "python-ml/models/setfit"
+cryptobert_path = "python-ml/models/cryptobert"
+llava_path = "python-ml/models/llava"
+
+# Model configurations
+setfit_base_model = "sentence-transformers/paraphrase-mpnet-base-v2"
+cryptobert_base_model = "ElKulako/cryptobert"
+llava_base_model = "llava-hf/llava-1.5-7b-hf"
+
+[ml.training]
+# SetFit training parameters
+setfit_batch_size = 16
+setfit_epochs = 4
+setfit_iterations = 20
+setfit_test_size = 0.2
+
+# CryptoBERT LoRA parameters
+cryptobert_lora_r = 16
+cryptobert_lora_alpha = 32
+cryptobert_lora_dropout = 0.1
+
+# LLaVA QLoRA parameters
+llava_load_in_4bit = true
+llava_max_new_tokens = 150
+
+[ml.ensemble]
+# Enable ensemble mode (requires trained models)
+enabled = false
+
+# Ensemble weights: VADER + ML models
+vader_weight = 0.3
+ml_weight = 0.7
+
+[ml.fusion]
+# Multi-modal fusion weights
+text_weight = 0.5
+image_weight = 0.3
+ocr_weight = 0.1
+context_weight = 0.1
+
+# Sarcasm detection threshold
+sarcasm_threshold = 0.7
+
+# Apply sentiment inversion when sarcasm detected
+apply_sarcasm_inversion = true
+
+[ml.active_learning]
+# Hybrid acquisition parameters
+uncertainty_weight = 0.6
+diversity_clusters = 50
+selection_pool_size = 1000
+
+# Labeling targets
+target_labels = 500
+labels_per_session = 50
+
+[ml.continual]
+# Experience replay buffer size
+replay_buffer_size = 2000
+
+# Replay ratio during retraining (30% old, 70% new)
+replay_ratio = 0.3
+
+# ADWIN drift detection sensitivity
+drift_delta = 0.002
+
+# Vocabulary fragmentation threshold for new term detection
+fragmentation_threshold = 3
+
+# Retraining schedule
+weekly_retrain = true
+weekly_retrain_day = "sunday"
+monthly_evaluation = true
+
+[ml.pseudo_labeling]
+# FixMatch threshold for pseudo-labels
+confidence_threshold = 0.95
+
+# Lower threshold after model improves
+improved_threshold = 0.90
+
+# Maximum pseudo-labels per batch
+max_pseudo_per_batch = 500
+
+[ml.inference]
+# Use ONNX Runtime for CPU inference
+use_onnx = false
+
+# Batch size for inference
+batch_size = 32
+
+# Device for inference ('cuda', 'cpu', 'auto')
+device = "auto"

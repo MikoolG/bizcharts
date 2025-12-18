@@ -6,9 +6,10 @@
 |-------|-------|------------------|
 | 1 | Data Collection | Rust scraper, SQLite schema, rate limiting |
 | 2 | Text Sentiment | VADER + lexicon, DuckDB aggregations |
-| 3 | Image Sentiment | CLIP, YOLOv8, OCR pipeline |
+| 2.5 | ML Training | SetFit, CryptoBERT, active learning, ensemble |
+| 3 | Image Sentiment | CLIP, YOLOv8, LLaVA fusion |
 | 4 | Visualization | Grafana dashboards, price correlation |
-| 5 | Advanced | Alerts, API, ML refinements |
+| 5 | Advanced | Alerts, API, continual learning |
 
 ---
 
@@ -448,6 +449,81 @@ def calculate_fear_greed_index(
 
 ---
 
+## Phase 2.5: ML Training Infrastructure (Dec 2024)
+
+### Goals
+- Train sentiment models from labeled data
+- Implement active learning for efficient labeling
+- Build ensemble system combining VADER + ML models
+- Prepare for continual learning and drift detection
+
+### Implemented Components
+
+#### Model Wrappers (`python-ml/src/models/`)
+- [x] `base.py` - Abstract base classes and `PredictionResult` dataclass
+- [x] `setfit_model.py` - SetFit wrapper with predict/batch/embeddings
+- [x] `cryptobert_model.py` - CryptoBERT with LoRA adapter support
+- [x] `llava_model.py` - LLaVA 7B with 4-bit quantization for memes
+
+#### Training Pipeline (`python-ml/src/training/`)
+- [x] `data_loader.py` - Load from SQLite, map 1-5 ratings to bearish/neutral/bullish
+- [x] `setfit_trainer.py` - Full SetFit training with MLflow tracking
+- [x] `runpod/setup.sh` - Environment setup for cloud training
+- [x] `runpod/train_setfit.py` - CLI script (~$0.06, 5 min)
+- [x] `runpod/train_cryptobert.py` - CLI script (~$0.35, 30 min)
+- [x] `runpod/train_llava.py` - CLI script (~$1.50-3.00, 2-4 hr)
+
+#### Active Learning (`python-ml/src/active_learning/`)
+- [x] `acquisition.py` - Hybrid uncertainty-diversity sampling
+- [x] `labeler_integration.py` - Integration with labeling GUI
+- [x] `--active-learning` flag in labeler.py
+
+#### Continual Learning (`python-ml/src/continual/`)
+- [x] `replay_buffer.py` - Reservoir sampling (2000 examples)
+- [x] `drift_detector.py` - ADWIN drift detection + vocabulary monitoring
+
+#### Multi-Modal Fusion (`python-ml/src/fusion/`)
+- [x] `sarcasm_detector.py` - Text-image incongruity detection
+- [x] `multimodal_pipeline.py` - Weighted fusion pipeline
+
+#### Production Inference (`python-ml/src/inference/`)
+- [x] `pipeline.py` - Batch inference for scraper integration
+- [x] `onnx_exporter.py` - ONNX export with INT8 quantization
+
+#### Integration
+- [x] `text_analyzer.py` - Ensemble mode (VADER 30% + ML 70%)
+- [x] `config/settings.toml` - ML configuration sections `[ml.*]`
+- [x] `pyproject.toml` - ML dependencies added
+
+### Usage
+
+```bash
+# Install ML dependencies
+cd python-ml && pip install -e .
+
+# Train SetFit model
+python -m src.training.setfit_trainer --db ../data/posts.db --output models/setfit
+
+# Label with active learning priority
+python -m src.labeler --active-learning --model models/setfit
+
+# Enable ensemble in config/settings.toml
+# [ml.ensemble]
+# enabled = true
+```
+
+### Acceptance Criteria
+- [x] SetFit training from labeled data
+- [x] CryptoBERT LoRA fine-tuning setup
+- [x] LLaVA quantized inference ready
+- [x] Active learning prioritizes uncertain+diverse posts
+- [x] Ensemble combines VADER + ML predictions
+- [x] RunPod scripts for cloud training
+- [ ] First production model trained (pending 200+ labels)
+- [ ] Continual learning triggered on drift (pending production use)
+
+---
+
 ## Phase 3: Image Sentiment Pipeline
 
 ### Goals
@@ -847,7 +923,8 @@ async def get_coin_sentiment(symbol: str):
 |-------|--------|-----------|
 | 1 | **COMPLETE** | Scraper running, data flowing, Warosu importer ready |
 | 2 | **IN PROGRESS** | Manual labeling complete (200 posts), text sentiment pending |
-| 3 | Pending | Image pipeline integrated |
+| 2.5 | **COMPLETE** | ML infrastructure ready (SetFit, CryptoBERT, LLaVA, active learning) |
+| 3 | Pending | Image pipeline integrated (LLaVA fusion ready) |
 | 4 | Pending | Full dashboard operational |
 | 5 | Ongoing | Continuous improvements |
 
@@ -869,6 +946,21 @@ async def get_coin_sentiment(symbol: str):
 - 200 posts labeled: 180 live (105 rated, 75 skipped), 20 warosu (13 rated, 7 skipped)
 - Average sentiment: 2.51 (live), 2.23 (warosu) - both leaning bearish
 - Text sentiment (VADER + lexicon) still pending
+
+**Phase 2.5 - ML Infrastructure Completed:**
+- Full self-training system implemented in `python-ml/src/`:
+  - Model wrappers: SetFit, CryptoBERT (LoRA), LLaVA (4-bit quantized)
+  - Training pipelines with MLflow tracking
+  - Active learning: hybrid uncertainty-diversity sampling
+  - Continual learning: replay buffer + ADWIN drift detection
+  - Multi-modal fusion: sarcasm detection via text-image incongruity
+  - Production inference: batch pipeline + ONNX export
+- Integration with existing tools:
+  - `labeler.py --active-learning` for priority ordering
+  - `text_analyzer.py` supports ensemble mode (VADER 30% + ML 70%)
+  - `config/settings.toml` has `[ml.*]` configuration sections
+- RunPod scripts for cloud GPU training (~$0.06-3.00 per run)
+- See [self-training.md](../self-training.md) for architecture details
 
 ## Success Metrics
 

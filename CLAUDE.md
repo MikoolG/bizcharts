@@ -6,11 +6,13 @@
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Live Scraper | ✅ Tested | Pulls ~150 threads from 4chan catalog, downloads thumbnails |
-| Warosu Importer | ✅ Tested | Fixed timestamp parsing, captures OPs only (not replies) |
-| Labeling GUI | ✅ Tested | 200 posts labeled (180 live, 20 warosu), avg sentiment ~2.4 (bearish) |
-| Text Sentiment | 🔄 Pending | VADER + lexicon implementation |
-| Image Sentiment | 🔄 Pending | CLIP/color analysis |
+| Live Scraper | ✅ Complete | Pulls ~150 threads from 4chan catalog, downloads thumbnails |
+| Warosu Importer | ✅ Complete | Fixed timestamp parsing, captures OPs only (not replies) |
+| Labeling GUI | ✅ Complete | 200 posts labeled, supports active learning mode |
+| Text Sentiment | ✅ Complete | VADER + lexicon, optional ML ensemble (SetFit/CryptoBERT) |
+| ML Training | ✅ Complete | SetFit, CryptoBERT, LLaVA wrappers + RunPod scripts |
+| Active Learning | ✅ Complete | Hybrid uncertainty-diversity sampling |
+| Image Sentiment | 🔄 Pending | LLaVA wrapper ready, integration pending |
 | Dashboard | 🔄 Pending | Streamlit UI |
 
 ## Architecture
@@ -21,14 +23,14 @@
 Data Collection (Rust)              Analysis (Python)
 ┌─────────────────────┐            ┌─────────────────────┐
 │ Live Scraper        │            │ Text: VADER+lexicon │
-│ - catalog.json/60s  │───────────▶│ Image: Color/CLIP   │
-│ - 1 req/sec limit   │  SQLite    │ Fusion: 60/40 split │
+│ - catalog.json/60s  │───────────▶│ + SetFit/CryptoBERT │
+│ - 1 req/sec limit   │  SQLite    │ Image: LLaVA fusion │
 ├─────────────────────┤  (shared)  ├─────────────────────┤
-│ Warosu Importer     │            │ Manual Labeling UI  │
-│ - Historical data   │───────────▶│ Analysis/Export     │
+│ Warosu Importer     │            │ Labeling UI         │
+│ - Historical data   │───────────▶│ + Active Learning   │
 ├─────────────────────┤            ├─────────────────────┤
-│ Maintenance         │            │ Price Provider      │
-│ - Retention/cleanup │            │ - Multi-source API  │
+│ Maintenance         │            │ ML Training         │
+│ - Retention/cleanup │            │ - RunPod scripts    │
 └─────────────────────┘            └─────────────────────┘
 ```
 
@@ -46,18 +48,26 @@ bizcharts/
 │       └── maintenance.rs   # Retention policies, cleanup
 ├── python-ml/
 │   └── src/
-│       ├── text_analyzer.py   # VADER + custom lexicon
-│       ├── image_analyzer.py  # CLIP + color analysis
-│       ├── aggregator.py      # Sentiment fusion
-│       ├── price_provider.py  # CoinGecko/Binance/CMC rotation
-│       ├── labeler.py         # Manual labeling GUI (Tkinter)
-│       ├── label_analysis.py  # Training data analysis/export
-│       └── dashboard.py       # Streamlit UI
+│       ├── text_analyzer.py   # VADER + custom lexicon + ensemble
+│       ├── labeler.py         # Manual labeling GUI + active learning
+│       ├── models/            # ML model wrappers
+│       │   ├── setfit_model.py    # SetFit few-shot learning
+│       │   ├── cryptobert_model.py # CryptoBERT with LoRA
+│       │   └── llava_model.py     # LLaVA 7B for memes
+│       ├── training/          # Training pipelines
+│       │   ├── data_loader.py     # Load from SQLite
+│       │   ├── setfit_trainer.py  # SetFit training
+│       │   └── runpod/            # Cloud GPU scripts
+│       ├── active_learning/   # Uncertainty-diversity sampling
+│       ├── continual/         # Replay buffer, drift detection
+│       ├── fusion/            # Multi-modal sarcasm detection
+│       └── inference/         # Batch pipeline, ONNX export
 ├── config/
-│   └── settings.toml        # All configuration
+│   └── settings.toml        # All configuration (incl. [ml.*] sections)
 ├── docs/
-│   ├── sentiment-strategy.md  # Analysis approach
-│   └── labeling-guide.md      # Manual labeling process
+│   ├── self-training.md       # ML architecture & research
+│   ├── labeling-guide.md      # Manual labeling + active learning
+│   └── plans/                 # Implementation plans
 └── data/                      # Databases (gitignored)
     └── posts.db
 ```
@@ -91,6 +101,12 @@ python3 -m src.labeler --source warosu              # Label only Warosu data
 python3 -m src.labeler --from 2024-01-01            # Label from date onward
 python3 -m src.labeler --stats                      # Show labeling statistics
 python3 -m src.labeler --export labels.csv          # Export to CSV
+
+# Active learning (prioritize uncertain posts)
+python3 -m src.labeler --active-learning --model models/setfit
+
+# ML Training
+python3 -m src.training.setfit_trainer --db ../data/posts.db --output models/setfit
 ```
 
 ## Database Schema
@@ -118,12 +134,14 @@ catalog_snapshots (snapshot_at, total_threads, avg_reply_count, top_coins)
 ## Sentiment Strategy
 
 See [docs/sentiment-strategy.md](docs/sentiment-strategy.md) for full details.
+See [docs/self-training.md](docs/self-training.md) for ML architecture.
 
 **Key concepts:**
-- **Multi-signal fusion**: Text (60%) + Image (40%) sentiment
+- **Multi-signal fusion**: Text (50%) + Image (30%) + OCR (10%) + Context (10%)
+- **Ensemble mode**: VADER (30%) + ML models (70%) when enabled
 - **Confidence weighting**: Uncertain posts get less weight in aggregations
 - **Reply-based importance**: Popular threads (high reply count) influence aggregate more
-- **Color heuristics**: Red-dominant images = bearish, green = bullish (before ML)
+- **Sarcasm detection**: Text-image incongruity signals ironic content
 
 **Lexicon examples** (VADER additions):
 - WAGMI: +3.5, NGMI: -3.5, LFG: +3.0
@@ -186,5 +204,23 @@ https://warosu.org/biz/?task=search&search_subject=bitcoin
 |------|---------|
 | [rust-scraper/src/db.rs](rust-scraper/src/db.rs) | Database schema and all SQL |
 | [docs/sentiment-strategy.md](docs/sentiment-strategy.md) | Full sentiment analysis approach |
-| [docs/labeling-guide.md](docs/labeling-guide.md) | Manual labeling instructions |
-| [config/settings.toml](config/settings.toml) | All configuration options |
+| [docs/self-training.md](docs/self-training.md) | ML architecture, models, training |
+| [docs/labeling-guide.md](docs/labeling-guide.md) | Manual labeling + active learning |
+| [docs/plans/implementation-roadmap.md](docs/plans/implementation-roadmap.md) | Project phases and progress |
+| [config/settings.toml](config/settings.toml) | All configuration (incl. `[ml.*]` sections) |
+
+## ML Models
+
+| Model | Purpose | Training Cost |
+|-------|---------|---------------|
+| SetFit | Few-shot text sentiment | ~$0.06 (5 min) |
+| CryptoBERT | Crypto-specific sentiment | ~$0.35 (30 min) |
+| LLaVA 7B | Meme understanding | ~$1.50-3.00 (2-4 hr) |
+
+Enable ensemble in `config/settings.toml`:
+```toml
+[ml.ensemble]
+enabled = true
+vader_weight = 0.3
+ml_weight = 0.7
+```

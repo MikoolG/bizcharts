@@ -1,12 +1,15 @@
-"""Text sentiment analysis using VADER and Claude."""
+"""Text sentiment analysis using VADER, SetFit, and CryptoBERT ensemble."""
 
 import html
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -15,19 +18,91 @@ class SentimentResult:
 
     score: float  # -1 to +1
     confidence: float  # 0 to 1
-    method: str  # 'vader', 'claude', etc.
+    method: str  # 'vader', 'ensemble', etc.
     is_greentext: bool
     bullish_signals: list[str]
     bearish_signals: list[str]
 
 
 class TextAnalyzer:
-    """Analyze text sentiment using VADER with custom /biz/ lexicon."""
+    """Analyze text sentiment using VADER with custom /biz/ lexicon.
 
-    def __init__(self, lexicon_path: str | Path = "config/lexicon.json"):
+    Supports optional ensemble mode combining:
+    - VADER (rule-based, fast)
+    - SetFit (few-shot learned)
+    - CryptoBERT (crypto domain-specific)
+
+    Ensemble weights: VADER 30%, ML models 70%
+    """
+
+    def __init__(
+        self,
+        lexicon_path: str | Path = "config/lexicon.json",
+        use_ensemble: bool = False,
+        setfit_path: str | Path | None = None,
+        cryptobert_path: str | Path | None = None,
+        device: str | None = None,
+    ):
+        """Initialize text analyzer.
+
+        Args:
+            lexicon_path: Path to custom /biz/ lexicon JSON
+            use_ensemble: Enable ML model ensemble (requires trained models)
+            setfit_path: Path to trained SetFit model
+            cryptobert_path: Path to trained CryptoBERT model (optional)
+            device: Device for ML inference ('cuda', 'cpu', or auto)
+        """
         self.analyzer = SentimentIntensityAnalyzer()
         self.lexicon = self._load_lexicon(lexicon_path)
         self._extend_vader_lexicon()
+
+        # Ensemble components
+        self.use_ensemble = use_ensemble
+        self._setfit_model = None
+        self._cryptobert_model = None
+
+        if use_ensemble:
+            self._init_ensemble(setfit_path, cryptobert_path, device)
+
+    def _init_ensemble(
+        self,
+        setfit_path: str | Path | None,
+        cryptobert_path: str | Path | None,
+        device: str | None,
+    ):
+        """Initialize ML models for ensemble."""
+        # Load SetFit model
+        if setfit_path and Path(setfit_path).exists():
+            try:
+                from .models.setfit_model import SetFitSentimentModel
+
+                self._setfit_model = SetFitSentimentModel(
+                    model_path=setfit_path,
+                    device=device,
+                )
+                logger.info(f"Loaded SetFit model from {setfit_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load SetFit model: {e}")
+        elif setfit_path:
+            logger.warning(f"SetFit model not found at {setfit_path}")
+
+        # Load CryptoBERT model (optional)
+        if cryptobert_path and Path(cryptobert_path).exists():
+            try:
+                from .models.cryptobert_model import CryptoBERTModel
+
+                self._cryptobert_model = CryptoBERTModel(
+                    model_path=cryptobert_path,
+                    device=device,
+                )
+                logger.info(f"Loaded CryptoBERT model from {cryptobert_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load CryptoBERT model: {e}")
+
+        # Verify at least one ML model loaded
+        if not self._setfit_model and not self._cryptobert_model:
+            logger.warning("No ML models loaded, falling back to VADER only")
+            self.use_ensemble = False
 
     def _load_lexicon(self, path: str | Path) -> dict:
         """Load custom lexicon from JSON file."""
@@ -103,18 +178,91 @@ class TextAnalyzer:
         bullish_signals = self._find_signals(cleaned_text, "bullish")
         bearish_signals = self._find_signals(cleaned_text, "bearish")
 
-        # Calculate confidence
-        confidence = self._calculate_confidence(scores, bullish_signals, bearish_signals)
+        # Calculate base VADER confidence
+        vader_confidence = self._calculate_confidence(scores, bullish_signals, bearish_signals)
 
         # Apply greentext discount
         greentext_factor = self.lexicon.get("greentext_discount", 0.6)
         if is_greentext:
-            confidence *= greentext_factor
+            vader_confidence *= greentext_factor
+
+        # Use ensemble if enabled
+        if self.use_ensemble:
+            return self._ensemble_analyze(
+                cleaned_text,
+                vader_score=scores["compound"],
+                vader_confidence=vader_confidence,
+                is_greentext=is_greentext,
+                bullish_signals=bullish_signals,
+                bearish_signals=bearish_signals,
+            )
 
         return SentimentResult(
             score=scores["compound"],
-            confidence=confidence,
+            confidence=vader_confidence,
             method="vader",
+            is_greentext=is_greentext,
+            bullish_signals=bullish_signals,
+            bearish_signals=bearish_signals,
+        )
+
+    def _ensemble_analyze(
+        self,
+        text: str,
+        vader_score: float,
+        vader_confidence: float,
+        is_greentext: bool,
+        bullish_signals: list[str],
+        bearish_signals: list[str],
+    ) -> SentimentResult:
+        """Combine VADER with ML model predictions.
+
+        Weights:
+        - VADER: 30%
+        - SetFit: 35% (or 70% if no CryptoBERT)
+        - CryptoBERT: 35% (if available)
+        """
+        ml_scores = []
+        ml_confidences = []
+
+        # Get SetFit prediction
+        if self._setfit_model:
+            try:
+                result = self._setfit_model.predict(text)
+                ml_scores.append(result.score)
+                ml_confidences.append(result.confidence)
+            except Exception as e:
+                logger.warning(f"SetFit prediction failed: {e}")
+
+        # Get CryptoBERT prediction
+        if self._cryptobert_model:
+            try:
+                result = self._cryptobert_model.predict(text)
+                ml_scores.append(result.score)
+                ml_confidences.append(result.confidence)
+            except Exception as e:
+                logger.warning(f"CryptoBERT prediction failed: {e}")
+
+        # Combine scores
+        if ml_scores:
+            # Average ML scores
+            ml_score = sum(ml_scores) / len(ml_scores)
+            ml_confidence = sum(ml_confidences) / len(ml_confidences)
+
+            # Weighted combination: 30% VADER, 70% ML
+            final_score = vader_score * 0.3 + ml_score * 0.7
+            final_confidence = vader_confidence * 0.3 + ml_confidence * 0.7
+            method = "ensemble"
+        else:
+            # Fall back to VADER only
+            final_score = vader_score
+            final_confidence = vader_confidence
+            method = "vader"
+
+        return SentimentResult(
+            score=final_score,
+            confidence=final_confidence,
+            method=method,
             is_greentext=is_greentext,
             bullish_signals=bullish_signals,
             bearish_signals=bearish_signals,
