@@ -110,28 +110,20 @@ def show_distribution(conn: sqlite3.Connection):
         bar = "#" * bar_len
 
         # Color indicator
-        if rating <= 3:
-            sentiment = "BEAR"
-        elif rating <= 4:
-            sentiment = "bear"
-        elif rating <= 6:
-            sentiment = "neut"
-        elif rating <= 7:
-            sentiment = "bull"
-        else:
-            sentiment = "BULL"
+        sentiment_labels = {1: "BEAR", 2: "NEUT", 3: "BULL"}
+        sentiment = sentiment_labels.get(rating, "????")
 
         print(f"  {rating:2d}    {count:4d}  {bar} ({pct:.1f}%) [{sentiment}]")
 
-    # Aggregate sentiment
-    bearish = sum(r['count'] for r in rows if r['sentiment_rating'] <= 4)
-    neutral = sum(r['count'] for r in rows if 5 <= r['sentiment_rating'] <= 6)
-    bullish = sum(r['count'] for r in rows if r['sentiment_rating'] >= 7)
+    # Aggregate sentiment (direct mapping for 1-3 scale)
+    bearish = sum(r['count'] for r in rows if r['sentiment_rating'] == 1)
+    neutral = sum(r['count'] for r in rows if r['sentiment_rating'] == 2)
+    bullish = sum(r['count'] for r in rows if r['sentiment_rating'] == 3)
 
     print(f"\nAggregate:")
-    print(f"  Bearish (1-4): {bearish} ({bearish/total*100:.1f}%)")
-    print(f"  Neutral (5-6): {neutral} ({neutral/total*100:.1f}%)")
-    print(f"  Bullish (7-10): {bullish} ({bullish/total*100:.1f}%)")
+    print(f"  Bearish (1): {bearish} ({bearish/total*100:.1f}%)")
+    print(f"  Neutral (2): {neutral} ({neutral/total*100:.1f}%)")
+    print(f"  Bullish (3): {bullish} ({bullish/total*100:.1f}%)")
 
 
 def show_errors(conn: sqlite3.Connection):
@@ -166,7 +158,7 @@ def show_errors(conn: sqlite3.Connection):
     errors = []
     for row in rows:
         auto = row['auto_score']  # -1 to +1
-        human = (row['human_rating'] - 5.5) / 4.5  # Convert 1-10 to -1 to +1
+        human = (row['human_rating'] - 2) / 1.0  # Convert 1-3 to -1 to +1
         error = abs(auto - human)
         errors.append({
             'thread_id': row['thread_id'],
@@ -198,7 +190,7 @@ def show_errors(conn: sqlite3.Connection):
     print("-" * 80)
     for e in errors[:10]:
         auto_str = f"{e['auto_score']:+.2f}"
-        human_str = f"{e['human_rating']}/10"
+        human_str = f"{e['human_rating']}/3"
         print(f"\nThread #{e['thread_id']} (error: {e['error']:.2f})")
         print(f"  Auto: {auto_str} | Human: {human_str}")
         print(f"  Subject: {e['subject'] or '(none)'}")
@@ -259,8 +251,8 @@ def export_training_data(conn: sqlite3.Connection, output_path: str):
         ])
 
         for row in rows:
-            # Normalize rating to -1 to +1 scale
-            normalized = (row['sentiment_rating'] - 5.5) / 4.5
+            # Normalize rating to -1 to +1 scale (1->-1, 2->0, 3->+1)
+            normalized = (row['sentiment_rating'] - 2) / 1.0
 
             writer.writerow([
                 row['thread_id'],
@@ -279,7 +271,7 @@ def export_training_data(conn: sqlite3.Connection, output_path: str):
 
     print(f"\nExported {len(rows)} labeled posts to {output_path}")
     print("\nColumns:")
-    print("  - sentiment_rating: Original 1-10 scale")
+    print("  - sentiment_rating: Original 1-3 scale (1=bearish, 2=neutral, 3=bullish)")
     print("  - sentiment_normalized: Converted to -1 to +1 scale")
 
 
@@ -307,7 +299,7 @@ def show_recent(conn: sqlite3.Connection, limit: int = 20):
     print("-" * 75)
 
     for row in cursor:
-        rating = "SKIP" if row['skipped'] else f"{row['sentiment_rating']}/10"
+        rating = "SKIP" if row['skipped'] else f"{row['sentiment_rating']}/3"
         subject = (row['subject'] or "(none)")[:38]
         print(f"{row['thread_id']:>10} {rating:>8} {row['labeler_id']:>10} {subject:<40}")
 

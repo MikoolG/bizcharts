@@ -269,7 +269,7 @@ def calculate_aggregate_sentiment(threads_with_sentiment):
 
 1. Label dataset using heuristic-assisted process:
    - High-confidence heuristic results → auto-label
-   - Low-confidence results → manual review (using 1-5 scale: 1=bearish, 3=neutral, 5=bullish)
+   - Low-confidence results → manual review (using 1-3 scale: 1=bearish, 2=neutral, 3=bullish)
 2. Train lightweight classifier (EfficientNet-B0)
 3. Compare model accuracy vs heuristics
 4. If model significantly better → deploy
@@ -305,7 +305,7 @@ def calculate_aggregate_sentiment(threads_with_sentiment):
 - [ ] CLIP zero-shot baseline
 - [ ] Greentext/sarcasm detection
 - [ ] Image download pipeline
-- [x] Manual review interface for labeling (1-5 scale with source/date filtering)
+- [x] Manual review interface for labeling (1-3 scale with source/date filtering)
 
 ### Nice to Have (Phase 3+)
 - [ ] Fine-tuned image classifier

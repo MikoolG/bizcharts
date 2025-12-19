@@ -97,8 +97,10 @@ python -m src.labeler --export warosu_labels.csv --source warosu
 
 | Key | Action |
 |-----|--------|
-| `1-5` | Rate sentiment (1=very bearish, 3=neutral, 5=very bullish) |
-| `0` or `S` | Skip (post is irrelevant to sentiment) |
+| `1` | Bearish (negative sentiment, panic, despair) |
+| `2` | Neutral/Irrelevant (no clear sentiment, questions, off-topic) |
+| `3` | Bullish (positive sentiment, euphoria, WAGMI) |
+| `0` or `S` | Skip (broken image, unreadable) |
 | `Left Arrow` | Go to previous post |
 | `Right Arrow` | Go to next post |
 | `N` | Add a note to current post |
@@ -106,23 +108,20 @@ python -m src.labeler --export warosu_labels.csv --source warosu
 
 ## Rating Scale
 
-Use a 1-5 scale for sentiment:
+Use a 1-3 scale for sentiment:
 
 | Rating | Meaning | Examples |
 |--------|---------|----------|
-| 1 | Very Bearish | "It's over", complete despair, pink wojak, predictions of crash |
-| 2 | Bearish | Negative outlook, concern, mild pessimism |
-| 3 | Neutral/Crab | Questions, news without opinion, analysis, mixed signals |
-| 4 | Bullish | Positive outlook, optimism, confident in holdings |
-| 5 | Very Bullish | "WAGMI", "to the moon", green wojak, euphoria |
+| 1 | Bearish | "It's over", despair, pink wojak, predictions of crash, panic |
+| 2 | Neutral/Irrelevant | Questions, news without opinion, off-topic, mixed signals |
+| 3 | Bullish | "WAGMI", "to the moon", green wojak, euphoria, optimism |
 
 ### Skip Criteria
 
-Skip posts that:
-- Are not about crypto/finance sentiment (off-topic)
-- Are purely informational with no opinion
-- Are spam or incomprehensible
-- Are meta-discussions about the board itself
+Use Skip (0/S) for posts that:
+- Have broken or missing images
+- Are unreadable or spam
+- Have corrupt data
 
 ## Data Storage
 
@@ -132,8 +131,8 @@ Labels are stored in the SQLite database (`data/posts.db`) in the `training_labe
 CREATE TABLE training_labels (
     id INTEGER PRIMARY KEY,
     thread_id INTEGER,              -- Links to thread_ops
-    sentiment_rating INTEGER,       -- 1-5 scale (1=bearish, 3=neutral, 5=bullish)
-    skipped BOOLEAN,                -- True if marked irrelevant
+    sentiment_rating INTEGER,       -- 1-3 scale (1=bearish, 2=neutral, 3=bullish)
+    skipped BOOLEAN,                -- True if marked for skip
     notes TEXT,                     -- Optional labeler notes
     labeler_id TEXT,                -- Session/labeler identifier
     labeled_at DATETIME,            -- When labeled
@@ -180,7 +179,7 @@ Labels are source-agnostic - they link to `thread_ops` by `thread_id` regardless
 - **Rate based on overall sentiment**, not just specific words
 - **Consider both text and image** when rating
 - **Irony/sarcasm**: If clearly ironic, rate the intended sentiment (e.g., ironic "WAGMI" during crash = bearish)
-- **Mixed signals**: If genuinely mixed, rate toward neutral (3)
+- **Mixed signals**: If genuinely mixed, rate as neutral (2)
 - **Greentext stories**: Often ironic - read the full context
 
 ## Using Labeled Data
@@ -208,8 +207,8 @@ df = pd.read_sql("""
       AND l.skipped = FALSE
 """, conn)
 
-# Convert human rating (1-5) to -1 to +1 scale
-df['human_score'] = (df['human_rating'] - 3) / 2
+# Convert human rating (1-3) to -1 to +1 scale
+df['human_score'] = (df['human_rating'] - 2) / 1.0
 
 # Calculate correlation
 correlation = df['auto_score'].corr(df['human_score'])
@@ -235,7 +234,7 @@ python train_setfit.py --db /workspace/data/posts.db --output /workspace/models/
 
 The training pipeline automatically:
 1. Loads labels from `training_labels` table
-2. Maps 1-5 ratings to bearish/neutral/bullish (1-2=bearish, 3=neutral, 4-5=bullish)
+2. Maps 1-3 ratings directly to labels (1=bearish, 2=neutral, 3=bullish)
 3. Splits data 80/20 for train/test
 4. Reports accuracy and F1 scores
 
@@ -266,7 +265,7 @@ df.to_csv("training_data.csv", index=False)
 Find where automated systems fail:
 
 ```python
-# High-confidence errors (note: human rating 1-5 converted to -1 to +1 scale)
+# High-confidence errors (note: human rating 1-3 converted to -1 to +1 scale)
 errors = pd.read_sql("""
     SELECT
         t.thread_id,
@@ -274,7 +273,7 @@ errors = pd.read_sql("""
         t.sentiment_score as auto_score,
         t.sentiment_confidence as auto_confidence,
         l.sentiment_rating as human_rating,
-        ABS(t.sentiment_score - (l.sentiment_rating - 3) / 2.0) as error
+        ABS(t.sentiment_score - (l.sentiment_rating - 2) / 1.0) as error
     FROM thread_ops t
     JOIN training_labels l ON t.thread_id = l.thread_id
     WHERE t.sentiment_confidence > 0.7

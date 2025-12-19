@@ -438,7 +438,7 @@ def calculate_fear_greed_index(
 
 **Manual labeling support (completed Dec 2024):**
 - [x] Labeling GUI with thumbnail display
-- [x] 1-5 sentiment scale (1=bearish, 3=neutral, 5=bullish)
+- [x] 1-3 sentiment scale (1=bearish, 2=neutral, 3=bullish)
 - [x] Source filtering (live/warosu)
 - [x] Date range filtering
 - [x] Progress indicator and keyboard navigation
@@ -466,7 +466,7 @@ def calculate_fear_greed_index(
 - [x] `llava_model.py` - LLaVA 7B with 4-bit quantization for memes
 
 #### Training Pipeline (`python-ml/src/training/`)
-- [x] `data_loader.py` - Load from SQLite, map 1-5 ratings to bearish/neutral/bullish
+- [x] `data_loader.py` - Load from SQLite, map 1-3 ratings to bearish/neutral/bullish
 - [x] `setfit_trainer.py` - Full SetFit training with MLflow tracking
 - [x] `runpod/setup.sh` - Environment setup for cloud training
 - [x] `runpod/train_setfit.py` - CLI script (~$0.06, 5 min)

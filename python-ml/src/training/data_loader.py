@@ -7,38 +7,34 @@ from datasets import Dataset
 
 
 def rating_to_label(rating: int) -> str:
-    """Convert 1-5 rating scale to sentiment label.
+    """Convert 1-3 rating scale to sentiment label.
 
     Mapping:
-        1-2: bearish
-        3: neutral
-        4-5: bullish
+        1: bearish
+        2: neutral
+        3: bullish
 
     Args:
-        rating: Integer rating from 1 to 5
+        rating: Integer rating from 1 to 3
 
     Returns:
         Sentiment label string
     """
-    if rating <= 2:
-        return "bearish"
-    elif rating == 3:
-        return "neutral"
-    else:
-        return "bullish"
+    mapping = {1: "bearish", 2: "neutral", 3: "bullish"}
+    return mapping.get(rating, "neutral")
 
 
 def label_to_rating(label: str) -> int:
-    """Convert sentiment label back to rating (midpoint).
+    """Convert sentiment label back to rating.
 
     Args:
         label: Sentiment label ('bearish', 'neutral', 'bullish')
 
     Returns:
-        Representative rating value
+        Rating value (1-3)
     """
-    mapping = {"bearish": 1, "neutral": 3, "bullish": 5}
-    return mapping.get(label, 3)
+    mapping = {"bearish": 1, "neutral": 2, "bullish": 3}
+    return mapping.get(label, 2)
 
 
 def load_labeled_data(

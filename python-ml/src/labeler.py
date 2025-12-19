@@ -14,12 +14,10 @@ Usage:
     python -m src.labeler --active-learning --model models/setfit  # Priority ordering
 
 Controls:
-    1       : Very bearish (strong sell signals, panic, despair)
-    2       : Somewhat bearish (negative outlook, concerns)
-    3       : Neutral/Crab (sideways, uncertain, mixed signals)
-    4       : Somewhat bullish (positive outlook, optimism)
-    5       : Very bullish (strong buy signals, euphoria, WAGMI)
-    0/S     : Not relevant to sentiment (skip)
+    1       : Bearish (negative sentiment, panic, despair, "it's over")
+    2       : Neutral/Irrelevant (no clear sentiment, questions, off-topic)
+    3       : Bullish (positive sentiment, euphoria, WAGMI, "we're gonna make it")
+    0/S     : Skip (broken image, unreadable, etc.)
     Left    : Go to previous post
     Right   : Go to next post
     N       : Add a note to current post
@@ -84,7 +82,7 @@ class LabelingSession:
             CREATE TABLE IF NOT EXISTS training_labels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 thread_id INTEGER,
-                sentiment_rating INTEGER CHECK(sentiment_rating >= 1 AND sentiment_rating <= 5),
+                sentiment_rating INTEGER CHECK(sentiment_rating >= 1 AND sentiment_rating <= 3),
                 skipped BOOLEAN DEFAULT FALSE,
                 notes TEXT,
                 labeler_id TEXT DEFAULT 'default',
@@ -418,9 +416,8 @@ class LabelingGUI:
         # Controls help
         help_text = """
 Controls:
-  1 = Very Bearish    2 = Bearish    3 = Neutral/Crab
-  4 = Bullish         5 = Very Bullish
-  0/S = Not relevant (skip)
+  1 = Bearish    2 = Neutral/Irrelevant    3 = Bullish
+  0/S = Skip (broken image, unreadable)
   Left/Right = Navigate    N = Add note    Q/Esc = Quit
         """
         self.help_label = ttk.Label(right_frame, text=help_text.strip(), style="TLabel", justify=tk.LEFT)
@@ -438,8 +435,8 @@ Controls:
         self.root.bind("n", lambda e: self._add_note())
         self.root.bind("N", lambda e: self._add_note())
 
-        # Number keys for ratings (1-5)
-        for i in range(1, 6):
+        # Number keys for ratings (1-3)
+        for i in range(1, 4):
             self.root.bind(str(i), lambda e, r=i: self._rate_post(r))
         # 0 for skip
         self.root.bind("0", lambda e: self._skip_post())
@@ -492,7 +489,7 @@ Controls:
         elif post.existing_rating:
             color = self._rating_color(post.existing_rating)
             label = self._rating_label(post.existing_rating)
-            self.rating_label.config(text=f"{post.existing_rating}/5 - {label}", foreground=color)
+            self.rating_label.config(text=f"{post.existing_rating}/3 - {label}", foreground=color)
         else:
             self.rating_label.config(text="Not rated", foreground="#666666")
 
@@ -583,22 +580,18 @@ Controls:
     def _rating_color(self, rating: int) -> str:
         """Get color for rating display."""
         colors = {
-            1: "#ff4444",  # Red - Very bearish
-            2: "#ff8844",  # Orange - Bearish
-            3: "#888888",  # Gray - Neutral
-            4: "#88cc44",  # Light green - Bullish
-            5: "#44ff44",  # Green - Very bullish
+            1: "#ff4444",  # Red - Bearish
+            2: "#888888",  # Gray - Neutral/Irrelevant
+            3: "#44ff44",  # Green - Bullish
         }
         return colors.get(rating, "#666666")
 
     def _rating_label(self, rating: int) -> str:
         """Get label for rating."""
         labels = {
-            1: "Very Bearish",
-            2: "Bearish",
-            3: "Neutral",
-            4: "Bullish",
-            5: "Very Bullish",
+            1: "Bearish",
+            2: "Neutral",
+            3: "Bullish",
         }
         return labels.get(rating, "Unknown")
 

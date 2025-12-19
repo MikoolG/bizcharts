@@ -82,7 +82,7 @@ python-ml/src/
 
 **python-ml/src/training/data_loader.py**
 - Load from `training_labels` table
-- Map 1-5 rating to labels: 1-2=bearish, 3=neutral, 4-5=bullish
+- Map 1-3 rating directly to labels: 1=bearish, 2=neutral, 3=bullish
 - Return HuggingFace Dataset
 
 **python-ml/src/training/setfit_trainer.py**

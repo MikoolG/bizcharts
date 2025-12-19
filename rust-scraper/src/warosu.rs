@@ -119,7 +119,7 @@ impl WarosuScraper {
     pub async fn search(&self, params: &SearchParams) -> Result<Vec<WarosuThread>> {
         self.rate_limiter.until_ready().await;
 
-        let mut url = format!("{}/{}/?task=search2", WAROSU_BASE, self.board);
+        let mut url = format!("{}/{}/?task=search", WAROSU_BASE, self.board);
 
         if let Some(ref subject) = params.subject {
             url.push_str(&format!("&search_subject={}", urlencoding::encode(subject)));
@@ -379,40 +379,73 @@ impl WarosuScraper {
 
     /// Parse search results HTML
     fn parse_search_results(&self, html: &str) -> Result<Vec<WarosuThread>> {
-        let _document = Html::parse_document(html);
         let mut threads = Vec::new();
 
-        // Note: Warosu uses table-based layout with minimal CSS classes.
-        // We use regex-based parsing as the primary method since the HTML structure
-        // is inconsistent. The scraper crate selectors are kept for potential future use.
-
-        // Parse using regex since Warosu HTML is messy
-        // Extract thread ID and timestamp from title attribute (Unix ms)
-        // HTML order: title=1766048571000 ... No.61508089</a> [<a href=.../Reply</a>]
-        // Only capture thread OPs (have [Reply] link), not replies
-        let thread_regex = regex::Regex::new(
-            r#"title=(\d{13}).*?No\.(\d+)</a>\s*\[<a href=/biz/thread/\d+>Reply</a>\]"#
+        // Search results use table-based layout with each post in a <table> block
+        // Structure: <table><tr><td class=doubledash>>><td class="comment reply">...</table>
+        let table_regex = regex::Regex::new(
+            r#"<table><tr><td class=doubledash>>><td class="comment reply">([\s\S]*?)</table>"#
         ).unwrap();
 
-        for cap in thread_regex.captures_iter(html) {
-            // cap[1] = timestamp (13 digits), cap[2] = thread_id
-            if let Ok(thread_id) = cap[2].parse::<i64>() {
-                // Timestamp in title is Unix milliseconds
-                let timestamp = cap[1].parse::<i64>().unwrap_or(0) / 1000;
+        let ts_regex = regex::Regex::new(r#"title=(\d{13})"#).unwrap();
+        let thread_id_regex = regex::Regex::new(r#"No\.(\d+)</a>\s*\[<a href=/biz/thread/\d+>View</a>\]"#).unwrap();
+        let subject_regex = regex::Regex::new(r#"<span class=filetitle>([^<]+)</span>"#).unwrap();
+        let image_regex = regex::Regex::new(r#"<a href=(https://i\.warosu\.org/data/biz/img/[^\s>]+)>"#).unwrap();
+        let thumb_regex = regex::Regex::new(r#"src=(https://i\.warosu\.org/data/biz/thumb/[^\s>]+)"#).unwrap();
+        let text_regex = regex::Regex::new(r#"<blockquote>([\s\S]*?)</blockquote>"#).unwrap();
 
-                threads.push(WarosuThread {
-                    thread_id,
-                    subject: None, // Will be filled if we fetch full thread
-                    op_text: None,
-                    op_name: Some("Anonymous".to_string()),
-                    op_tripcode: None,
-                    timestamp,
-                    image_url: None,
-                    thumbnail_url: None,
-                    image_filename: None,
-                    reply_count: None,
-                });
+        for table_cap in table_regex.captures_iter(html) {
+            let section = &table_cap[1];
+
+            // Extract thread ID - must have [View] link to be an OP
+            let thread_id = match thread_id_regex.captures(section) {
+                Some(cap) => cap[1].parse::<i64>().unwrap_or(0),
+                None => continue,
+            };
+
+            if thread_id == 0 {
+                continue;
             }
+
+            let mut thread = WarosuThread {
+                thread_id,
+                subject: None,
+                op_text: None,
+                op_name: Some("Anonymous".to_string()),
+                op_tripcode: None,
+                timestamp: 0,
+                image_url: None,
+                thumbnail_url: None,
+                image_filename: None,
+                reply_count: None,
+            };
+
+            // Extract timestamp
+            if let Some(ts_cap) = ts_regex.captures(section) {
+                thread.timestamp = ts_cap[1].parse::<i64>().unwrap_or(0) / 1000;
+            }
+
+            // Extract subject
+            if let Some(subj_cap) = subject_regex.captures(section) {
+                thread.subject = Some(html_escape::decode_html_entities(&subj_cap[1]).to_string());
+            }
+
+            // Extract image URL
+            if let Some(img_cap) = image_regex.captures(section) {
+                thread.image_url = Some(img_cap[1].to_string());
+            }
+
+            // Extract thumbnail URL
+            if let Some(thumb_cap) = thumb_regex.captures(section) {
+                thread.thumbnail_url = Some(thumb_cap[1].to_string());
+            }
+
+            // Extract text from blockquote
+            if let Some(text_cap) = text_regex.captures(section) {
+                thread.op_text = Some(strip_html_warosu(&text_cap[1]));
+            }
+
+            threads.push(thread);
         }
 
         // Deduplicate by thread_id
@@ -445,8 +478,9 @@ impl WarosuScraper {
             r#"<div class=comment id=p(\d+)>([\s\S]*?)(?:<br class=newthr>|<table>)"#
         ).unwrap();
 
+        // Note: Warosu uses unquoted class attributes like class=filetitle
         let subject_regex = regex::Regex::new(
-            r#"<span[^>]*class="[^"]*(?:subject|filetitle)[^"]*"[^>]*>([^<]+)</span>"#
+            r#"<span[^>]*class=(?:"[^"]*)?(?:subject|filetitle)[^>]*>([^<]+)</span>"#
         ).unwrap();
 
         // Note: Warosu HTML doesn't quote attribute values, so we match without quotes
@@ -545,14 +579,14 @@ impl WarosuScraper {
             thread.timestamp = cap[1].parse::<i64>().unwrap_or(0) / 1000;
         }
 
-        // Extract subject
-        let subject_regex = regex::Regex::new(r#"<span[^>]*class="[^"]*filetitle[^"]*"[^>]*>([^<]+)</span>"#).unwrap();
+        // Extract subject (Warosu uses unquoted class attributes)
+        let subject_regex = regex::Regex::new(r#"<span[^>]*class=(?:"[^"]*)?filetitle[^>]*>([^<]+)</span>"#).unwrap();
         if let Some(cap) = subject_regex.captures(html) {
             thread.subject = Some(html_escape::decode_html_entities(&cap[1]).to_string());
         }
 
-        // Extract poster name
-        let name_regex = regex::Regex::new(r#"<span[^>]*class="[^"]*postername[^"]*"[^>]*>([^<]+)</span>"#).unwrap();
+        // Extract poster name (Warosu uses unquoted class attributes)
+        let name_regex = regex::Regex::new(r#"<span[^>]*class=(?:"[^"]*)?postername[^>]*>([^<]+)</span>"#).unwrap();
         if let Some(cap) = name_regex.captures(html) {
             let name = html_escape::decode_html_entities(&cap[1]).to_string();
             if name != "Anonymous" {
