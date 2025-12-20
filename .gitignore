@@ -39,6 +39,7 @@ Cargo.lock
 # IDE
 .idea/
 .vscode/
+.serena/
 *.swp
 *.swo
 *~
